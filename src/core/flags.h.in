@@ -57,6 +57,10 @@
 #cmakedefine ENABLE_GDB_STUB
 #endif
 
+#ifndef ENABLE_PROFILER
+#cmakedefine ENABLE_PROFILER
+#endif
+
 #ifndef ENABLE_SCRIPTING
 #cmakedefine ENABLE_SCRIPTING
 #endif

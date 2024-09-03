@@ -1716,7 +1716,14 @@ void Window::setupMenu(QMenuBar* menubar) {
 	m_platformActions.insert(mPLATFORM_GBA, gdbWindow);
 #endif
 #endif
+
 #if defined(ENABLE_DEBUGGERS) || defined(ENABLE_SCRIPTING)
+	m_actions.addSeparator("tools");
+#endif
+
+#if defined(ENABLE_PROFILER)
+	m_actions.addAction(tr("Start profiling"), "profileStart", this, &Window::consoleOpen, "tools");
+	m_actions.addAction(tr("Stop profiling"), "profileStop", this, &Window::consoleOpen, "tools");
 	m_actions.addSeparator("tools");
 #endif
 
