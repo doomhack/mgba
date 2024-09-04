@@ -1723,6 +1723,7 @@ void Window::setupMenu(QMenuBar* menubar) {
 
 #if defined(ENABLE_PROFILER)
 	m_actions.addAction(tr("Start profiling"), "profileStart", this, &Window::consoleOpen, "tools");
+	m_actions.addAction(tr("Profiler..."), "profilerWindow", this, &Window::consoleOpen, "tools");
 	m_actions.addAction(tr("Stop profiling"), "profileStop", this, &Window::consoleOpen, "tools");
 	m_actions.addSeparator("tools");
 #endif

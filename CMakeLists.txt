@@ -489,6 +489,8 @@ set(WANT_PNG ${USE_PNG})
 set(WANT_SQLITE3 ${USE_SQLITE3})
 set(USE_CMOCKA ${BUILD_SUITE})
 
+set(WANT_ELF ${USE_ELF})
+
 if(DEFINED VCPKG_TARGET_TRIPLET)
 	find_feature(USE_FFMPEG "FFMPEG")
 	if(FFMPEG_FOUND)
@@ -640,6 +642,73 @@ if(WANT_SQLITE3 AND NOT USE_SQLITE3)
 	set(USE_SQLITE3 ON)
 endif()
 
+if (WANT_ELF AND NOT USE_ELF)
+	include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/)
+	include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/)
+	
+	add_definitions(-DHAVE_MEMCPY=1)
+	add_definitions(-DHAVE_MEMMOVE=1)
+
+	list(APPEND FEATURE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/32.fsize.c)
+	set(ELF_SRC
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/32.getehdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/32.getphdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/32.getshdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/32.newehdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/32.newphdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/32.xlatetof.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/64.xlatetof.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/assert.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/begin.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/checksum.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/cntl.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/cook.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/data.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/end.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/errmsg.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/errno.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/fill.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/flag.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/gelfehdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/gelfphdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/gelfshdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/gelftrans.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/getarhdr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/getarsym.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/getbase.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/getdata.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/getident.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/getscn.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/hash.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/input.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/kind.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/memset.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/ndxscn.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/newdata.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/newscn.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/next.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/nextscn.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/nlist.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/opt.delscn.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/rand.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/rawdata.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/rawfile.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/strptr.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/swap64.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/update.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/verdef_32_tof.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/verdef_32_tom.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/verdef_64_tof.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/verdef_64_tom.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/version.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/x.elfext.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/x.movscn.c
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/x.remscn.c)
+	list(APPEND FEATURE_SRC ${ELF_SRC})
+	list(APPEND FEATURES ELF)
+	set(USE_ELF ON)
+endif()
+
 if(USE_LIBZIP)
 	if(TARGET libzip::zip)
 		set(ZIP_LIBRARIES libzip::zip)
@@ -753,10 +822,10 @@ endif()
 
 if(USE_ELF)
 	list(APPEND FEATURES ELF)
-	include_directories(AFTER ${LIBELF_INCLUDE_DIRS})
-	link_directories(${LIBELF_LIBRARY_DIRS})
-	list(APPEND DEPENDENCY_LIB ${LIBELF_LIBRARIES})
-	set(CPACK_DEBIAN_PACKAGE_DEPENDS "${CPACK_DEBIAN_PACKAGE_DEPENDS},libelf1")
+	#include_directories(AFTER ${LIBELF_INCLUDE_DIRS})
+	#link_directories(${LIBELF_LIBRARY_DIRS})
+	#list(APPEND DEPENDENCY_LIB ${LIBELF_LIBRARIES})
+	#set(CPACK_DEBIAN_PACKAGE_DEPENDS "${CPACK_DEBIAN_PACKAGE_DEPENDS},libelf1")
 endif()
 
 if (USE_DISCORD_RPC)
