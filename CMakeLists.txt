@@ -513,6 +513,8 @@ find_feature(ENABLE_PYTHON "PythonLibs")
 # Features
 add_subdirectory(src/debugger)
 add_subdirectory(src/feature)
+add_subdirectory(src/profiler)
+
 
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6")
 
@@ -538,6 +540,8 @@ source_group("Debugger" FILES ${DEBUGGER_SRC})
 if(ENABLE_PROFILER)
 	list(APPEND ENABLES PROFILER)
 endif()
+source_group("Profiler" FILES ${PROFILER_SRC})
+
 
 if(USE_FFMPEG)
 	list(APPEND FEATURES FFMPEG)
@@ -913,6 +917,11 @@ if(ENABLE_DEBUGGERS)
 	list(APPEND FEATURE_SRC ${DEBUGGER_SRC})
 	list(APPEND TEST_SRC ${DEBUGGER_TEST_SRC})
 	list(APPEND ENABLES DEBUGGERS)
+endif()
+
+if(ENABLE_PROFILER)
+	list(APPEND FEATURE_SRC ${PROFILER_SRC})
+	list(APPEND ENABLES PROFILER)
 endif()
 
 if(ENABLE_SCRIPTING)

@@ -9,6 +9,11 @@
 #include <mgba/internal/arm/isa-inlines.h>
 #include <mgba/internal/arm/isa-thumb.h>
 
+#ifdef ENABLE_PROFILER
+	#include <mgba/profiler/profiler.h>
+#endif
+
+
 void ARMSetPrivilegeMode(struct ARMCore* cpu, enum PrivilegeMode mode) {
 	if (mode == cpu->privilegeMode) {
 		// Not switching modes after all
@@ -198,7 +203,29 @@ static const uint16_t conditionLut[16] = {
 	0x0000 // NV
 };
 
+static inline void _ProfilerEnter(struct ARMCore* cpu) {
+#ifdef ENABLE_PROFILER
+	if (cpu->components[CPU_COMPONENT_PROFILER])
+	{
+		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])
+		    ->enterInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->gprs[ARM_PC], cpu->cycles);
+	}
+#endif
+}
+
+static inline void _ProfilerExit(struct ARMCore* cpu) {
+#ifdef ENABLE_PROFILER
+	if (cpu->components[CPU_COMPONENT_PROFILER])
+	{
+		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])
+		    ->exitInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->cycles);
+	}
+#endif
+}
+
 static inline void ARMStep(struct ARMCore* cpu) {
+	_ProfilerEnter(cpu);
+
 	uint32_t opcode = cpu->prefetch[0];
 	cpu->prefetch[0] = cpu->prefetch[1];
 	cpu->gprs[ARM_PC] += WORD_SIZE_ARM;
@@ -210,20 +237,29 @@ static inline void ARMStep(struct ARMCore* cpu) {
 		bool conditionMet = conditionLut[condition] & (1 << flags);
 		if (!conditionMet) {
 			cpu->cycles += ARM_PREFETCH_CYCLES;
+
+			_ProfilerExit(cpu);
+
 			return;
 		}
 	}
 	ARMInstruction instruction = _armTable[((opcode >> 16) & 0xFF0) | ((opcode >> 4) & 0x00F)];
 	instruction(cpu, opcode);
+
+	_ProfilerExit(cpu);
 }
 
 static inline void ThumbStep(struct ARMCore* cpu) {
+	_ProfilerEnter(cpu);
+
 	uint32_t opcode = cpu->prefetch[0];
 	cpu->prefetch[0] = cpu->prefetch[1];
 	cpu->gprs[ARM_PC] += WORD_SIZE_THUMB;
 	LOAD_16(cpu->prefetch[1], cpu->gprs[ARM_PC] & cpu->memory.activeMask, cpu->memory.activeRegion);
 	ThumbInstruction instruction = _thumbTable[opcode >> 6];
 	instruction(cpu, opcode);
+
+	_ProfilerExit(cpu);
 }
 
 void ARMRun(struct ARMCore* cpu) {
