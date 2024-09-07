@@ -4,6 +4,9 @@
 
 mLOG_DEFINE_CATEGORY(PROFILER, "Profiler", "core.profiler");
 
+const uint32_t PROFILER_ID = 0xC0DEBA5E;
+
+
 void mProfilerInit(struct mProfiler* profiler) {
 	memset(profiler, 0, sizeof(*profiler));
 }
@@ -19,6 +22,7 @@ void mProfilerAttach(struct mProfiler* profiler, struct mCore* core) {
 
 	profiler->core = core;
 
+	profiler->d.id = PROFILER_ID;
 	profiler->d.init = &_ProfilerInit;
 	profiler->d.deinit = &_ProfilerDeInit;
 
@@ -27,10 +31,11 @@ void mProfilerAttach(struct mProfiler* profiler, struct mCore* core) {
 }
 
 void mProfilerAttachModule(struct mProfiler* profiler, struct mProfilerModule* module) {
+	profiler->core->attachProfiler(profiler->core, profiler);
 }
 
 void mProfilerDetachModule(struct mProfiler* profiler, struct mProfilerModule* module) {
-
+	profiler->core->detachProfiler(profiler->core);
 }
 
 
@@ -44,7 +49,6 @@ void _ProfilerDeInit(struct mProfilerModule* module) {
 }
 
 void _ProfilerEnterInstruction(struct mProfilerModule* module, void* instr, uint32_t cycles) {
-
 }
 
 void _ProfilerExitInstruction(struct mProfilerModule* module, uint32_t cycles) {

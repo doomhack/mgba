@@ -115,6 +115,12 @@ public:
 	void detachDebuggerModule(mDebuggerModule*);
 #endif
 
+#ifdef ENABLE_PROFILER
+	mProfiler* profiler() { return &m_profiler; }
+	void attachProfiler();
+	void detachProfiler();
+#endif
+
 	void setMultiplayerController(MultiplayerController*);
 	void clearMultiplayerController();
 	MultiplayerController* multiplayerController() { return m_multiplayer; }
@@ -307,6 +313,10 @@ private:
 
 #ifdef ENABLE_DEBUGGERS
 	struct mDebugger m_debugger;
+#endif
+
+#ifdef ENABLE_PROFILER
+	struct mProfiler m_profiler;
 #endif
 
 	int m_fastForward = false;

@@ -257,6 +257,7 @@ static bool _GBACoreInit(struct mCore* core) {
 	core->board = gba;
 	core->timing = &gba->timing;
 	core->debugger = NULL;
+	core->profiler = NULL;
 	core->symbolTable = NULL;
 	core->videoLogger = NULL;
 	gbacore->hasOverride = false;
@@ -1310,6 +1311,24 @@ static bool _GBACoreLookupIdentifier(struct mCore* core, const char* name, int32
 }
 #endif
 
+#ifdef ENABLE_PROFILER
+static void _GBACoreAttachProfiler(struct mCore* core, struct mProfiler* profiler) {
+	if (core->profiler == profiler) {
+		return;
+	}
+	if (core->profiler) {
+		GBAAttachProfiler(core, profiler);
+	}
+	GBAAttachProfiler(core, profiler);
+	core->profiler = profiler;
+}
+
+static void _GBACoreDetachProfiler(struct mCore* core) {
+	GBADetachProfiler(core);
+	core->profiler = NULL;
+}
+#endif
+
 static struct mCheatDevice* _GBACoreCheatDevice(struct mCore* core) {
 	struct GBACore* gbacore = (struct GBACore*) core;
 	if (!gbacore->cheatDevice) {
@@ -1566,6 +1585,7 @@ struct mCore* GBACoreCreate(void) {
 	core->listRegisters = _GBACoreListRegisters;
 	core->readRegister = _GBACoreReadRegister;
 	core->writeRegister = _GBACoreWriteRegister;
+
 #ifdef ENABLE_DEBUGGERS
 	core->supportsDebuggerType = _GBACoreSupportsDebuggerType;
 	core->debuggerPlatform = _GBACoreDebuggerPlatform;
@@ -1575,6 +1595,12 @@ struct mCore* GBACoreCreate(void) {
 	core->loadSymbols = _GBACoreLoadSymbols;
 	core->lookupIdentifier = _GBACoreLookupIdentifier;
 #endif
+
+#ifdef ENABLE_PROFILER
+	core->attachProfiler = _GBACoreAttachProfiler;
+	core->detachProfiler = _GBACoreDetachProfiler;
+#endif
+
 	core->cheatDevice = _GBACoreCheatDevice;
 	core->savedataClone = _GBACoreSavedataClone;
 	core->savedataRestore = _GBACoreSavedataRestore;

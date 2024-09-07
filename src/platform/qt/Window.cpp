@@ -626,6 +626,21 @@ void Window::consoleOpen() {
 }
 #endif
 
+#ifdef ENABLE_PROFILER
+void Window::beginProfile() {
+	m_controller.get()->attachProfiler();
+}
+
+void Window::endProfile() {
+	m_controller.get()->detachProfiler();
+}
+
+void Window::profileOpen() {
+
+}
+
+#endif
+
 #ifdef ENABLE_SCRIPTING
 void Window::scriptingOpen() {
 	if (!m_scripting) {
@@ -1722,9 +1737,9 @@ void Window::setupMenu(QMenuBar* menubar) {
 #endif
 
 #if defined(ENABLE_PROFILER)
-	m_actions.addAction(tr("Start profiling"), "profileStart", this, &Window::consoleOpen, "tools");
-	m_actions.addAction(tr("Profiler..."), "profilerWindow", this, &Window::consoleOpen, "tools");
-	m_actions.addAction(tr("Stop profiling"), "profileStop", this, &Window::consoleOpen, "tools");
+	m_actions.addAction(tr("Start profiling"), "profileStart", this, &Window::beginProfile, "tools");
+	m_actions.addAction(tr("Profiler..."), "profilerWindow", this, &Window::endProfile, "tools");
+	m_actions.addAction(tr("Stop profiling"), "profileStop", this, &Window::profileOpen, "tools");
 	m_actions.addSeparator("tools");
 #endif
 

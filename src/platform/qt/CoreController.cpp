@@ -53,6 +53,10 @@ CoreController::CoreController(mCore* core, QObject* parent)
 	mDebuggerInit(&m_debugger);
 #endif
 
+#ifdef ENABLE_PROFILER
+	memset(&m_profiler, 0, sizeof(m_profiler));
+#endif
+
 	m_resetActions.append([this]() {
 		if (m_autoload) {
 			mCoreLoadState(m_threadContext.core, 0, m_loadStateFlags);
@@ -361,6 +365,22 @@ void CoreController::attachDebuggerModule(mDebuggerModule* module, bool interrup
 void CoreController::detachDebuggerModule(mDebuggerModule* module) {
 	Interrupter interrupter(this);
 	mDebuggerDetachModule(&m_debugger, module);
+}
+#endif
+
+#ifdef ENABLE_PROFILER
+void CoreController::attachProfiler() {
+	if (!m_threadContext.core->profiler) {
+		mProfilerAttach(&m_profiler, m_threadContext.core);
+		mProfilerAttachModule(&m_profiler, m_profiler.module);
+	}
+}
+
+void CoreController::detachProfiler() {
+	if (!m_threadContext.core->profiler) {
+		return;
+	}
+	m_threadContext.core->detachProfiler(m_threadContext.core);
 }
 #endif
 

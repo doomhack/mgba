@@ -381,6 +381,22 @@ void GBADetachDebugger(struct GBA* gba) {
 }
 #endif
 
+#ifdef ENABLE_PROFILER
+void GBAAttachProfiler(struct GBA* gba, struct mProfiler* profiler) {
+	gba->profiler = profiler;
+	gba->cpu->components[CPU_COMPONENT_PROFILER] = &profiler->d;
+	ARMHotplugAttach(gba->cpu, CPU_COMPONENT_PROFILER);
+}
+
+void GBADetachProfiler(struct GBA* gba) {
+	if (gba->profiler) {
+		ARMHotplugDetach(gba->cpu, CPU_COMPONENT_PROFILER);
+	}
+	gba->cpu->components[CPU_COMPONENT_PROFILER] = NULL;
+	gba->debugger = NULL;
+}
+#endif
+
 bool GBALoadNull(struct GBA* gba) {
 	GBAUnloadROM(gba);
 	gba->romVf = NULL;

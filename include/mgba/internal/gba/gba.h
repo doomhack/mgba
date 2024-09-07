@@ -19,6 +19,10 @@ CXX_GUARD_START
 #include <mgba/internal/gba/sio.h>
 #include <mgba/internal/gba/timer.h>
 
+#ifdef ENABLE_PROFILER
+#include <mgba/profiler/profiler.h>
+#endif
+
 #define GBA_ARM7TDMI_FREQUENCY 0x1000000U
 
 enum GBAIRQ {
@@ -75,6 +79,7 @@ struct GBA {
 	struct mTiming timing;
 
 	struct ARMDebugger* debugger;
+	struct mProfiler* profiler;
 
 	uint32_t bus;
 	int performingDMA;
@@ -164,6 +169,12 @@ bool GBAVerifyELFEntry(struct ELF* elf, uint32_t target);
 struct mDebugger;
 void GBAAttachDebugger(struct GBA* gba, struct mDebugger* debugger);
 void GBADetachDebugger(struct GBA* gba);
+#endif
+
+#ifdef ENABLE_PROFILER
+struct mProfiler;
+void GBAAttachProfiler(struct GBA* gba, struct mProfiler* profiler);
+void GBADetachProfiler(struct GBA* gba);
 #endif
 
 void GBASetBreakpoint(struct GBA* gba, struct mCPUComponent* component, uint32_t address, enum ExecutionMode mode,

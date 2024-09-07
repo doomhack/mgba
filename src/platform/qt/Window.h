@@ -112,6 +112,12 @@ public slots:
 	void consoleOpen();
 #endif
 
+#ifdef ENABLE_PROFILER
+	void beginProfile();
+	void endProfile();
+	void profileOpen();
+#endif
+
 #ifdef ENABLE_GDB_STUB
 	void gdbOpen();
 #endif

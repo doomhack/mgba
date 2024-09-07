@@ -22,6 +22,10 @@ CXX_GUARD_START
 #include <mgba/debugger/debugger.h>
 #endif
 
+#ifdef ENABLE_PROFILER
+#include <mgba/profiler/profiler.h>
+#endif
+
 enum mPlatform {
 	mPLATFORM_NONE = -1,
 	mPLATFORM_GBA = 0,
@@ -43,6 +47,7 @@ struct mCore {
 	void* board;
 	struct mTiming* timing;
 	struct mDebugger* debugger;
+	struct mProfiler* profiler;
 	struct mDebuggerSymbols* symbolTable;
 	struct mVideoLogger* videoLogger;
 
@@ -156,6 +161,11 @@ struct mCore {
 
 	void (*loadSymbols)(struct mCore*, struct VFile*);
 	bool (*lookupIdentifier)(struct mCore*, const char* name, int32_t* value, int* segment);
+#endif
+
+#ifdef ENABLE_PROFILER
+	void (*attachProfiler)(struct mCore*, struct mProfiler*);
+	void (*detachProfiler)(struct mCore*);
 #endif
 
 	struct mCheatDevice* (*cheatDevice)(struct mCore*);
