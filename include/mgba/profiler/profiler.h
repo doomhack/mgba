@@ -58,6 +58,9 @@ inline struct mProfilerModule* mProfilerModule(struct mCPUComponent* component) 
 	return component ? ((struct mProfiler*) component)->module : NULL;
 }
 
+void CollectorArmInstruction(uint32_t* instr, uint32_t cycles);
+void CollectorThumbInstruction(uint32_t* instr, uint32_t cycles);
+
 CXX_GUARD_END
 
 #endif

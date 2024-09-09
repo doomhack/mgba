@@ -6,6 +6,9 @@ mLOG_DEFINE_CATEGORY(PROFILER, "Profiler", "core.profiler");
 
 const uint32_t PROFILER_ID = 0xC0DEBA5E;
 
+uint32_t prevCycles = 0;
+void* instruction = NULL;
+
 
 void mProfilerInit(struct mProfiler* profiler) {
 	memset(profiler, 0, sizeof(*profiler));
@@ -49,11 +52,12 @@ void _ProfilerDeInit(struct mProfilerModule* module) {
 }
 
 void _ProfilerEnterInstruction(struct mProfilerModule* module, void* instr, uint32_t cycles) {
-
+	prevCycles = cycles;
+	instruction = instr;
 }
 
 void _ProfilerExitInstruction(struct mProfilerModule* module, uint32_t cycles) {
-
+	CollectorArmInstruction(instruction, cycles - prevCycles);
 }
 
 void _ProfilerEnterInterrupt(struct mProfilerModule* module, uint32_t interrupt, uint32_t cycles) {
