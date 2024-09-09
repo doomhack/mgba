@@ -23,11 +23,11 @@ void mProfilerAttach(struct mProfiler* profiler, struct mCore* core) {
 	profiler->core = core;
 
 	profiler->d.id = PROFILER_ID;
-	profiler->d.init = &_ProfilerInit;
-	profiler->d.deinit = &_ProfilerDeInit;
+	profiler->d.init = _ProfilerInit;
+	profiler->d.deinit = _ProfilerDeInit;
 
-	profiler->module->enterInstruction = &_ProfilerEnterInstruction;
-	profiler->module->exitInstruction = &_ProfilerExitInstruction;
+	profiler->module->enterInstruction = _ProfilerEnterInstruction;
+	profiler->module->exitInstruction = _ProfilerExitInstruction;
 }
 
 void mProfilerAttachModule(struct mProfiler* profiler, struct mProfilerModule* module) {
@@ -49,6 +49,7 @@ void _ProfilerDeInit(struct mProfilerModule* module) {
 }
 
 void _ProfilerEnterInstruction(struct mProfilerModule* module, void* instr, uint32_t cycles) {
+
 }
 
 void _ProfilerExitInstruction(struct mProfilerModule* module, uint32_t cycles) {

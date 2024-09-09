@@ -371,7 +371,9 @@ void CoreController::detachDebuggerModule(mDebuggerModule* module) {
 #ifdef ENABLE_PROFILER
 void CoreController::attachProfiler() {
 	if (!m_threadContext.core->profiler) {
+
 		mProfilerAttach(&m_profiler, m_threadContext.core);
+
 		mProfilerAttachModule(&m_profiler, m_profiler.module);
 	}
 }

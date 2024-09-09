@@ -1317,9 +1317,9 @@ static void _GBACoreAttachProfiler(struct mCore* core, struct mProfiler* profile
 		return;
 	}
 	if (core->profiler) {
-		GBAAttachProfiler(core, profiler);
+		GBAAttachProfiler(core->board, profiler);
 	}
-	GBAAttachProfiler(core, profiler);
+	GBAAttachProfiler(core->board, profiler);
 	core->profiler = profiler;
 }
 
