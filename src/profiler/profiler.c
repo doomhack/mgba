@@ -1,6 +1,10 @@
 #include <mgba/profiler/profiler.h>
 
 #include <mgba/core/core.h>
+#include <mgba/internal/gba/gba.h>
+#include <mgba-util/vfs.h>
+
+
 
 mLOG_DEFINE_CATEGORY(PROFILER, "Profiler", "core.profiler");
 
@@ -8,6 +12,9 @@ const uint32_t PROFILER_ID = 0xC0DEBA5E;
 
 uint32_t prevCycles = 0;
 void* instruction = NULL;
+bool armMode = false;
+
+uint8_t* elfData = NULL;
 
 
 void mProfilerInit(struct mProfiler* profiler) {
@@ -21,6 +28,10 @@ void mProfilerDeinit(struct mProfiler* profiler) {
 
 void mProfilerAttach(struct mProfiler* profiler, struct mCore* core) {
 	profiler->module = malloc(sizeof(struct mProfilerModule));
+
+	if (profiler->module == NULL)
+		return;
+
 	memset(profiler->module, 0, sizeof(struct mProfilerModule));
 
 	profiler->core = core;
@@ -31,6 +42,8 @@ void mProfilerAttach(struct mProfiler* profiler, struct mCore* core) {
 
 	profiler->module->enterInstruction = _ProfilerEnterInstruction;
 	profiler->module->exitInstruction = _ProfilerExitInstruction;
+
+	CollectorInitSymbols(core->romPath);
 }
 
 void mProfilerAttachModule(struct mProfiler* profiler, struct mProfilerModule* module) {
@@ -51,13 +64,17 @@ void _ProfilerDeInit(struct mProfilerModule* module) {
 
 }
 
-void _ProfilerEnterInstruction(struct mProfilerModule* module, void* instr, uint32_t cycles) {
+void _ProfilerEnterInstruction(struct mProfilerModule* module, void* instr, uint32_t cycles, bool arm) {
 	prevCycles = cycles;
 	instruction = instr;
+	armMode = arm;
 }
 
-void _ProfilerExitInstruction(struct mProfilerModule* module, uint32_t cycles) {
-	CollectorArmInstruction(instruction, cycles - prevCycles);
+void _ProfilerExitInstruction(struct mProfilerModule* module, uint32_t cycles, bool executed) {
+	if (armMode)
+		CollectorArmInstruction(instruction, cycles - prevCycles, executed);
+	else
+		CollectorThumbInstruction(instruction, cycles - prevCycles, executed);
 }
 
 void _ProfilerEnterInterrupt(struct mProfilerModule* module, uint32_t interrupt, uint32_t cycles) {

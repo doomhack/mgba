@@ -62,6 +62,8 @@ struct mCore {
 
 	struct mRTCGenericSource rtc;
 
+	char* romPath;
+
 	bool (*init)(struct mCore*);
 	void (*deinit)(struct mCore*);
 

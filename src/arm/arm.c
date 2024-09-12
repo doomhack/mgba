@@ -203,28 +203,28 @@ static const uint16_t conditionLut[16] = {
 	0x0000 // NV
 };
 
-static inline void _ProfilerEnter(struct ARMCore* cpu) {
+static inline void _ProfilerEnter(struct ARMCore* cpu, bool armMode) {
 #ifdef ENABLE_PROFILER
 	if (cpu->components[CPU_COMPONENT_PROFILER])
 	{
 		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])
-		    ->enterInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->gprs[ARM_PC], cpu->cycles);
+		    ->enterInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->gprs[ARM_PC], cpu->cycles, armMode);
 	}
 #endif
 }
 
-static inline void _ProfilerExit(struct ARMCore* cpu) {
+static inline void _ProfilerExit(struct ARMCore* cpu, bool executed) {
 #ifdef ENABLE_PROFILER
 	if (cpu->components[CPU_COMPONENT_PROFILER])
 	{
 		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])
-		    ->exitInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->cycles);
+		    ->exitInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->cycles, executed);
 	}
 #endif
 }
 
 static inline void ARMStep(struct ARMCore* cpu) {
-	_ProfilerEnter(cpu);
+	_ProfilerEnter(cpu, true);
 
 	uint32_t opcode = cpu->prefetch[0];
 	cpu->prefetch[0] = cpu->prefetch[1];
@@ -238,7 +238,7 @@ static inline void ARMStep(struct ARMCore* cpu) {
 		if (!conditionMet) {
 			cpu->cycles += ARM_PREFETCH_CYCLES;
 
-			_ProfilerExit(cpu);
+			_ProfilerExit(cpu, false);
 
 			return;
 		}
@@ -246,11 +246,11 @@ static inline void ARMStep(struct ARMCore* cpu) {
 	ARMInstruction instruction = _armTable[((opcode >> 16) & 0xFF0) | ((opcode >> 4) & 0x00F)];
 	instruction(cpu, opcode);
 
-	_ProfilerExit(cpu);
+	_ProfilerExit(cpu, true);
 }
 
 static inline void ThumbStep(struct ARMCore* cpu) {
-	_ProfilerEnter(cpu);
+	_ProfilerEnter(cpu, false);
 
 	uint32_t opcode = cpu->prefetch[0];
 	cpu->prefetch[0] = cpu->prefetch[1];
@@ -259,7 +259,7 @@ static inline void ThumbStep(struct ARMCore* cpu) {
 	ThumbInstruction instruction = _thumbTable[opcode >> 6];
 	instruction(cpu, opcode);
 
-	_ProfilerExit(cpu);
+	_ProfilerExit(cpu, true);
 }
 
 void ARMRun(struct ARMCore* cpu) {

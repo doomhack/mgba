@@ -646,6 +646,31 @@ if(WANT_SQLITE3 AND NOT USE_SQLITE3)
 	set(USE_SQLITE3 ON)
 endif()
 
+#if(USE_PROFILER)
+	include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/)
+	include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/)
+
+	list(APPEND FEATURE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/abbrev.cc)
+	set(ELFIN_SRC
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/abbrev.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/attrs.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/cursor.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/die.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/die_str_map.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/dwarf.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/elf2.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/expr.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/line.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/rangelist.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/value.cc
+		${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/dwarf/to_string.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/elf/elf.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/elf/elf_to_string.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelfin/elf/mmap_loader.cc)
+
+	list(APPEND FEATURE_SRC ${ELFIN_SRC})
+#endif()
+
 if (WANT_ELF AND NOT USE_ELF)
 	include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/)
 	include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/libelf/)
@@ -1021,7 +1046,7 @@ if(NOT SKIP_LIBRARY)
 	endif()
 
 	target_include_directories(${BINARY_NAME} BEFORE PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/include)
-	set_target_properties(${BINARY_NAME} PROPERTIES COMPILE_PDB_NAME "mgba_dll" VERSION ${LIB_VERSION_STRING} SOVERSION ${LIB_VERSION_ABI} COMPILE_DEFINITIONS "${OS_DEFINES};${FEATURE_DEFINES};${FUNCTION_DEFINES};${EXPORT_DEFINES}" COMPILE_OPTIONS "${FEATURE_FLAGS}")
+	set_target_properties(${BINARY_NAME} PROPERTIES VERSION ${LIB_VERSION_STRING} SOVERSION ${LIB_VERSION_ABI} COMPILE_DEFINITIONS "${OS_DEFINES};${FEATURE_DEFINES};${FUNCTION_DEFINES};${EXPORT_DEFINES}" COMPILE_OPTIONS "${FEATURE_FLAGS}")
 	add_dependencies(${BINARY_NAME} ${BINARY_NAME}-version-info)
 
 	file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include/mgba-util)

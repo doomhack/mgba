@@ -104,6 +104,10 @@ CoreController* CoreManager::loadGame(VFile* vf, const QString& path, const QStr
 		core->loadROM(core, vf);
 	}
 
+	QString fullPath = QDir(base).filePath(path);
+	core->romPath = new char[fullPath.length() + 1];
+	strcpy(core->romPath, fullPath.toLatin1().constData());
+
 	QByteArray bytes(path.toUtf8());
 	separatePath(bytes.constData(), nullptr, core->dirs.baseName, nullptr);
 
