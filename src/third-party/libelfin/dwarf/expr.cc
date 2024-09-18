@@ -89,38 +89,38 @@ expr::evaluate(expr_context *ctx, const std::initializer_list<taddr> &arguments)
                 DW_OP op = (DW_OP)cur.fixed<ubyte>();
                 switch (op) {
                         // 2.5.1.1 Literal encodings
-		        case DW_OP::lit0:
-		        case DW_OP::lit1:
-		        case DW_OP::lit2:
-		        case DW_OP::lit3:
-		        case DW_OP::lit4:
-		        case DW_OP::lit5:
-		        case DW_OP::lit6:
-		        case DW_OP::lit7:
-		        case DW_OP::lit8:
-		        case DW_OP::lit9:
-		        case DW_OP::lit10:
-		        case DW_OP::lit11:
-		        case DW_OP::lit12:
-		        case DW_OP::lit13:
-		        case DW_OP::lit14:
-		        case DW_OP::lit15:
-		        case DW_OP::lit16:
-		        case DW_OP::lit17:
-		        case DW_OP::lit18:
-		        case DW_OP::lit19:
-		        case DW_OP::lit20:
-		        case DW_OP::lit21:
-		        case DW_OP::lit22:
-		        case DW_OP::lit23:
-		        case DW_OP::lit24:
-		        case DW_OP::lit25:
-		        case DW_OP::lit26:
-		        case DW_OP::lit27:
-		        case DW_OP::lit28:
-		        case DW_OP::lit29:
-		        case DW_OP::lit30:
-		        case DW_OP::lit31:
+                case DW_OP::lit0:
+                case DW_OP::lit1:
+                case DW_OP::lit2:
+                case DW_OP::lit3:
+                case DW_OP::lit4:
+                case DW_OP::lit5:
+                case DW_OP::lit6:
+                case DW_OP::lit7:
+                case DW_OP::lit8:
+                case DW_OP::lit9:
+                case DW_OP::lit10:
+                case DW_OP::lit11:
+                case DW_OP::lit12:
+                case DW_OP::lit13:
+                case DW_OP::lit14:
+                case DW_OP::lit15:
+                case DW_OP::lit16:
+                case DW_OP::lit17:
+                case DW_OP::lit18:
+                case DW_OP::lit19:
+                case DW_OP::lit20:
+                case DW_OP::lit21:
+                case DW_OP::lit22:
+                case DW_OP::lit23:
+                case DW_OP::lit24:
+                case DW_OP::lit25:
+                case DW_OP::lit26:
+                case DW_OP::lit27:
+                case DW_OP::lit28:
+                case DW_OP::lit29:
+                case DW_OP::lit30:
+                case DW_OP::lit31:
                         stack.push_back((unsigned)op - (unsigned)DW_OP::lit0);
                         break;
                 case DW_OP::addr:
@@ -161,38 +161,39 @@ expr::evaluate(expr_context *ctx, const std::initializer_list<taddr> &arguments)
                 case DW_OP::fbreg:
                         // XXX
                         throw runtime_error("DW_OP_fbreg not implemented");
-		        case DW_OP::breg0:
-		        case DW_OP::breg1:
-		        case DW_OP::breg2:
-		        case DW_OP::breg3:
-		        case DW_OP::breg4:
-		        case DW_OP::breg5:
-		        case DW_OP::breg6:
-		        case DW_OP::breg7:
-		        case DW_OP::breg8:
-		        case DW_OP::breg9:
-		        case DW_OP::breg10:
-		        case DW_OP::breg11:
-		        case DW_OP::breg12:
-		        case DW_OP::breg13:
-		        case DW_OP::breg14:
-		        case DW_OP::breg15:
-		        case DW_OP::breg16:
-		        case DW_OP::breg17:
-		        case DW_OP::breg18:
-		        case DW_OP::breg19:
-		        case DW_OP::breg20:
-		        case DW_OP::breg21:
-		        case DW_OP::breg22:
-		        case DW_OP::breg23:
-		        case DW_OP::breg24:
-		        case DW_OP::breg25:
-		        case DW_OP::breg26:
-		        case DW_OP::breg27:
-		        case DW_OP::breg28:
-		        case DW_OP::breg29:
-		        case DW_OP::breg30:
-		        case DW_OP::breg31:
+
+                case DW_OP::breg0:
+                case DW_OP::breg1:
+                case DW_OP::breg2:
+                case DW_OP::breg3:
+                case DW_OP::breg4:
+                case DW_OP::breg5:
+                case DW_OP::breg6:
+                case DW_OP::breg7:
+                case DW_OP::breg8:
+                case DW_OP::breg9:
+                case DW_OP::breg10:
+                case DW_OP::breg11:
+                case DW_OP::breg12:
+                case DW_OP::breg13:
+                case DW_OP::breg14:
+                case DW_OP::breg15:
+                case DW_OP::breg16:
+                case DW_OP::breg17:
+                case DW_OP::breg18:
+                case DW_OP::breg19:
+                case DW_OP::breg20:
+                case DW_OP::breg21:
+                case DW_OP::breg22:
+                case DW_OP::breg23:
+                case DW_OP::breg24:
+                case DW_OP::breg25:
+                case DW_OP::breg26:
+                case DW_OP::breg27:
+                case DW_OP::breg28:
+                case DW_OP::breg29:
+                case DW_OP::breg30:
+                case DW_OP::breg31:
                         tmp1.u = (unsigned)op - (unsigned)DW_OP::breg0;
                         tmp2.s = cur.sleb128();
                         stack.push_back((int64_t)ctx->reg(tmp1.u) + tmp2.s);
@@ -427,38 +428,38 @@ expr::evaluate(expr_context *ctx, const std::initializer_list<taddr> &arguments)
                         break;
 
                         // 2.6.1.1.2 Register location descriptions
-		        case DW_OP::reg0:
-		        case DW_OP::reg1:
-		        case DW_OP::reg2:
-		        case DW_OP::reg3:
-		        case DW_OP::reg4:
-		        case DW_OP::reg5:
-		        case DW_OP::reg6:
-		        case DW_OP::reg7:
-		        case DW_OP::reg8:
-		        case DW_OP::reg9:
-		        case DW_OP::reg10:
-		        case DW_OP::reg11:
-		        case DW_OP::reg12:
-		        case DW_OP::reg13:
-		        case DW_OP::reg14:
-		        case DW_OP::reg15:
-		        case DW_OP::reg16:
-		        case DW_OP::reg17:
-		        case DW_OP::reg18:
-		        case DW_OP::reg19:
-		        case DW_OP::reg20:
-		        case DW_OP::reg21:
-		        case DW_OP::reg22:
-		        case DW_OP::reg23:
-		        case DW_OP::reg24:
-		        case DW_OP::reg25:
-		        case DW_OP::reg26:
-		        case DW_OP::reg27:
-		        case DW_OP::reg28:
-		        case DW_OP::reg29:
-		        case DW_OP::reg30:
-		        case DW_OP::reg31:
+                case DW_OP::reg0:
+                case DW_OP::reg1:
+                case DW_OP::reg2:
+                case DW_OP::reg3:
+                case DW_OP::reg4:
+                case DW_OP::reg5:
+                case DW_OP::reg6:
+                case DW_OP::reg7:
+                case DW_OP::reg8:
+                case DW_OP::reg9:
+                case DW_OP::reg10:
+                case DW_OP::reg11:
+                case DW_OP::reg12:
+                case DW_OP::reg13:
+                case DW_OP::reg14:
+                case DW_OP::reg15:
+                case DW_OP::reg16:
+                case DW_OP::reg17:
+                case DW_OP::reg18:
+                case DW_OP::reg19:
+                case DW_OP::reg20:
+                case DW_OP::reg21:
+                case DW_OP::reg22:
+                case DW_OP::reg23:
+                case DW_OP::reg24:
+                case DW_OP::reg25:
+                case DW_OP::reg26:
+                case DW_OP::reg27:
+                case DW_OP::reg28:
+                case DW_OP::reg29:
+                case DW_OP::reg30:
+                case DW_OP::reg31:
                         result.location_type = expr_result::type::reg;
                         result.value = (unsigned)op - (unsigned)DW_OP::reg0;
                         break;
@@ -487,9 +488,7 @@ expr::evaluate(expr_context *ctx, const std::initializer_list<taddr> &arguments)
                         throw runtime_error(to_string(op) + " not implemented");
 
                 default:
-                        // XXX We could let the context evaluate this,
-                        // but it would need access to the cursor.
-                        throw expr_error("unknown user op " + to_string(op));
+                        throw expr_error("bad operation " + to_string(op));
                 }
 #pragma GCC diagnostic pop
 #undef CHECK

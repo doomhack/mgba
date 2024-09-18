@@ -70,11 +70,11 @@ void _ProfilerEnterInstruction(struct mProfilerModule* module, void* instr, uint
 	armMode = arm;
 }
 
-void _ProfilerExitInstruction(struct mProfilerModule* module, uint32_t cycles, bool executed) {
+void _ProfilerExitInstruction(struct mProfilerModule* module, void* linkReg, uint32_t cycles) {
 	if (armMode)
-		CollectorArmInstruction(instruction, cycles - prevCycles, executed);
+		CollectorArmInstruction(instruction, linkReg, cycles - prevCycles);
 	else
-		CollectorThumbInstruction(instruction, cycles - prevCycles, executed);
+		CollectorThumbInstruction(instruction, linkReg, cycles - prevCycles);
 }
 
 void _ProfilerEnterInterrupt(struct mProfilerModule* module, uint32_t interrupt, uint32_t cycles) {

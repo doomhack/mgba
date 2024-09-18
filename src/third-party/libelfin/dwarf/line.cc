@@ -416,12 +416,12 @@ line_table::iterator::step(cursor *cur)
                         // XXX Only DWARF4
                         regs.discriminator = cur->uleb128();
                         break;
-		        default:
-			        // XXX Vendor extensions
-                        throw runtime_error("vendor line number opcode " +
-                                            to_string((DW_LNE)opcode) +
-                                            " not implemented");
 
+                default:
+                        // XXX Prior to DWARF4, any opcode number
+                        // could be a vendor extension
+                        throw format_error("unknown line number opcode " +
+                                           to_string((DW_LNE)opcode));
                 }
 #pragma GCC diagnostic pop
                 if (cur->get_section_offset() > end)

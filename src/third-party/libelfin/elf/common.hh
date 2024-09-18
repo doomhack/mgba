@@ -11,7 +11,15 @@
 #define ELFPP_END_INTERNAL    }
 
 #include <cstdint>
+
+#if defined(_MSC_VER) // MSVC
 #include <intrin.h>
+    #define bswap32(x) _byteswap_ulong(x)
+    #define bswap64(x) _byteswap_uint64(x)
+#elif defined(__GNUC__) // GCC/Clang
+    #define bswap32(x) __builtin_bswap32(x)
+    #define bswap64(x) __builtin_bswap64(x)
+#endif
 
 ELFPP_BEGIN_NAMESPACE
 
@@ -71,9 +79,9 @@ swizzle(T v, byte_order from, byte_order to)
                 return (T)(((x&0xFF) << 8) | (x >> 8));
         }
         case 4:
-		    return (T) _byteswap_ulong((std::uint32_t) v);
+                return (T)bswap32((std::uint32_t)v);
         case 8:
-		    return (T) _byteswap_uint64((std::uint64_t) v);
+                return (T)bswap64((std::uint64_t)v);
         }
 }
 

@@ -10,7 +10,6 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>
 
 using namespace std;
 
@@ -24,29 +23,21 @@ class mmap_loader : public loader
 public:
         mmap_loader(FILE* fd)
         {
-                fseek(fd, 0, SEEK_END);
-		        int end = ftell(fd);
+            fseek(fd, 0, SEEK_END);
 
-                if (end == (off_t)-1)
-                        throw system_error(errno, system_category(),
-                                           "finding file length");
-                lim = end;
+            lim = ftell(fd);
 
-                //base = mmap(nullptr, lim, PROT_READ, MAP_SHARED, fd, 0);
-                base = new char[lim];
-                fseek(fd, 0, SEEK_SET);
+            base = new char[lim];
+            fseek(fd, 0, SEEK_SET);
 
-                fread(base, lim, 1, fd);
+            fread(base, 1, lim, fd);
 
-                //if (base == MAP_FAILED)
-                //        throw system_error(errno, system_category(),"mmap'ing file");
-                fclose(fd);
+            fclose(fd);
         }
 
         ~mmap_loader()
         {
             delete[] (char*)base;
-                //munmap(base, lim);
         }
 
         const void *load(off_t offset, size_t size)

@@ -93,8 +93,8 @@ public:
                 while (target < n)
                         target <<= 1;
 
+                char* newbuf = new char[sizeof(T) * target];
                 //char *newbuf = new char[sizeof(T[target])];
-		        char* newbuf = new char[sizeof(T) * target];
                 T *src = base, *dest = (T*)newbuf;
                 for (; src < end; src++, dest++) {
                         new(dest) T(*src);

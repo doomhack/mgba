@@ -134,9 +134,8 @@ resolve_type(DW_AT name, DW_FORM form)
                         return value::type::rangelist;
 
                 default:
-                        return value::type::invalid;
-
-                }
+                    return value::type::invalid;
+            }
         }
         throw format_error("unknown attribute form " + to_string(form));
 }

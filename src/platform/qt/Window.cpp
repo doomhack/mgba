@@ -628,6 +628,7 @@ void Window::consoleOpen() {
 
 #ifdef ENABLE_PROFILER
 void Window::beginProfile() {
+	m_controller.get()->reset();
 	m_controller.get()->attachProfiler();
 }
 

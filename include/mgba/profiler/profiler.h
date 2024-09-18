@@ -23,7 +23,7 @@ struct mProfilerModule {
 	void (*deinit)(struct mProfilerModule*);
 
 	void (*enterInstruction)(struct mProfilerModule*, void* instr, uint32_t cycles, bool armMode);
-	void (*exitInstruction)(struct mProfilerModule*, uint32_t cycles, bool executed);
+	void (*exitInstruction)(struct mProfilerModule*, void* linkReg, uint32_t cycles);
 
 	void (*enterInterrupt)(struct mProfilerModule*, uint32_t interrupt, uint32_t cycles);
 	void (*exitInterrupt)(struct mProfilerModule*, uint32_t cycles);
@@ -45,7 +45,7 @@ void _ProfilerInit(struct mProfilerModule*);
 void _ProfilerDeInit(struct mProfilerModule*);
 
 void _ProfilerEnterInstruction(struct mProfilerModule*, void* instr, uint32_t cycles);
-void _ProfilerExitInstruction(struct mProfilerModule*, uint32_t cycles, bool executed);
+void _ProfilerExitInstruction(struct mProfilerModule*, uint32_t cycles);
 
 void _ProfilerEnterInterrupt(struct mProfilerModule*, uint32_t interrupt, uint32_t cycles);
 void _ProfilerExitInterrupt(struct mProfilerModule*, uint32_t cycles);
@@ -58,8 +58,8 @@ inline struct mProfilerModule* mProfilerModule(struct mCPUComponent* component) 
 	return component ? ((struct mProfiler*) component)->module : NULL;
 }
 
-void CollectorArmInstruction(uint32_t* instr, uint32_t cycles, bool executed);
-void CollectorThumbInstruction(uint32_t* instr, uint32_t cycles, bool executed);
+void CollectorArmInstruction(uint32_t* instr, uint32_t* linkReg, uint32_t cycles);
+void CollectorThumbInstruction(uint16_t* instr, uint32_t* linkReg, uint32_t cycles);
 void CollectorInitSymbols(const char* romPath);
 
     CXX_GUARD_END
