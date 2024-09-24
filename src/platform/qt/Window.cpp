@@ -633,7 +633,8 @@ void Window::beginProfile() {
 }
 
 void Window::endProfile() {
-	m_controller.get()->detachProfiler();
+	m_controller.get()->stop();
+	//m_controller.get()->detachProfiler();
 }
 
 void Window::profileOpen() {
@@ -659,6 +660,15 @@ void Window::scriptingOpen() {
 	openView(view);
 }
 #endif
+
+#ifdef ENABLE_PROFILER
+void Window::profilerOpen()
+{
+	ProfilerView* view = new ProfilerView();
+	openView(view);
+}
+#endif // ENABLE_PROFILER
+
 
 void Window::keyPressEvent(QKeyEvent* event) {
 	if (event->isAutoRepeat()) {
@@ -1739,8 +1749,8 @@ void Window::setupMenu(QMenuBar* menubar) {
 
 #if defined(ENABLE_PROFILER)
 	m_actions.addAction(tr("Start profiling"), "profileStart", this, &Window::beginProfile, "tools");
-	m_actions.addAction(tr("Profiler..."), "profilerWindow", this, &Window::endProfile, "tools");
-	m_actions.addAction(tr("Stop profiling"), "profileStop", this, &Window::profileOpen, "tools");
+	m_actions.addAction(tr("Profiler..."), "profilerWindow", this, &Window::profilerOpen, "tools");
+	m_actions.addAction(tr("Stop profiling"), "profileStop", this, &Window::endProfile, "tools");
 	m_actions.addSeparator("tools");
 #endif
 

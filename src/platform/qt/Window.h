@@ -27,6 +27,10 @@
 #include "scripting/ScriptingController.h"
 #endif
 
+#ifdef ENABLE_PROFILER
+#include "profiler/ProfilerView.h"
+#endif
+
 namespace QGBA {
 
 class AudioProcessor;
@@ -124,6 +128,10 @@ public slots:
 
 #ifdef ENABLE_SCRIPTING
 	void scriptingOpen();
+#endif
+
+#ifdef ENABLE_PROFILER
+	void profilerOpen();
 #endif
 
 protected:

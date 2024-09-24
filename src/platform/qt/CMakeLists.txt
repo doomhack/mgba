@@ -279,6 +279,11 @@ if(USE_DISCORD_RPC)
 	list(APPEND SOURCE_FILES DiscordCoordinator.cpp)
 endif()
 
+#if(ENBALE_PROFILER)
+	list(APPEND SOURCE_FILES profiler/ProfilerView.cpp)
+	list(APPEND UI_FILES profiler/ProfilerView.ui)
+#endif()
+
 if(ENABLE_SCRIPTING)
 	list(APPEND SOURCE_FILES
 		scripting/ScriptingController.cpp
