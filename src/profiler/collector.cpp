@@ -1,38 +1,7 @@
-#include <map>
-#include <stack>
-
 #include <mgba/profiler/collector.h>
 
 #include <elf/elf++.hh>
 
-
-typedef struct functionEntry
-{
-	uint32_t base_addr = 0;
-	uint32_t length = 0;
-	std::string name;
-};
-
-typedef struct functionStats
-{
-	uint64_t cycles = 0;
-	uint32_t callCount = 0;
-};
-
-typedef struct stackFrame
-{
-	functionEntry* function = nullptr;
-	stackFrame* prevFrame = nullptr;
-	void* linkReg = nullptr;
-};
-
-typedef struct callTreeNode
-{
-	std::map<functionEntry*, callTreeNode*> childNodes;
-	callTreeNode* parentNode = nullptr;
-	unsigned int callCount = 0;
-	uint64_t cycleCount = 0;
-};
 
 std::map<void*, uint64_t> instructionMap;
 std::vector<functionEntry*> functionList;
@@ -43,6 +12,21 @@ callTreeNode* callTree = nullptr;
 callTreeNode* currentNode = nullptr;
 
 uint64_t totalCycles = 0;
+
+const std::map<void*, uint64_t>& GetInstructionMap()
+{
+	return instructionMap;
+}
+
+const std::map<functionEntry*, functionStats*>& GetFunctionCounts()
+{
+	return functionCounts;
+}
+
+const callTreeNode* GetCallTree()
+{
+	return callTree;
+}
 
 static bool addrInFunction(void* address, functionEntry* func)
 {
@@ -134,6 +118,7 @@ static bool checkCall(void* instr, void* linkReg, uint32_t cycles)
 	{
 		callTreeNode* newNode = new callTreeNode();
 		newNode->parentNode = currentNode;
+		newNode->function = thisFunction;
 		currentNode->childNodes[thisFunction] = newNode;
 
 	}
