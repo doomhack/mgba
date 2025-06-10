@@ -205,6 +205,7 @@ static const uint16_t conditionLut[16] = {
 
 static inline void _ProfilerEnter(struct ARMCore* cpu, bool armMode) {
 #ifdef ENABLE_PROFILER
+
 	if (cpu->components[CPU_COMPONENT_PROFILER])
 	{
 		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])
@@ -215,6 +216,7 @@ static inline void _ProfilerEnter(struct ARMCore* cpu, bool armMode) {
 
 static inline void _ProfilerExit(struct ARMCore* cpu) {
 #ifdef ENABLE_PROFILER
+
 	if (cpu->components[CPU_COMPONENT_PROFILER])
 	{
 		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])

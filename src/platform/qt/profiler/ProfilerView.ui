@@ -26,7 +26,7 @@
          <enum>QTabWidget::TabShape::Rounded</enum>
         </property>
         <property name="currentIndex">
-         <number>1</number>
+         <number>2</number>
         </property>
         <property name="documentMode">
          <bool>false</bool>
@@ -52,12 +52,6 @@
          </layout>
         </widget>
         <widget class="QWidget" name="callTreeTab">
-         <property name="maximumSize">
-          <size>
-           <width>819</width>
-           <height>16777215</height>
-          </size>
-         </property>
          <attribute name="title">
           <string>Call Tree</string>
          </attribute>
@@ -69,22 +63,22 @@
             </property>
             <column>
              <property name="text">
-              <string notr="true">1</string>
+              <string notr="true">Function</string>
              </property>
             </column>
             <column>
              <property name="text">
-              <string notr="true">2</string>
+              <string notr="true">Calls</string>
              </property>
             </column>
             <column>
              <property name="text">
-              <string notr="true">3</string>
+              <string notr="true">Inclusive Ms</string>
              </property>
             </column>
             <column>
              <property name="text">
-              <string notr="true">4</string>
+              <string notr="true">Exclusive Ms</string>
              </property>
             </column>
            </widget>
@@ -97,14 +91,52 @@
          </attribute>
          <layout class="QVBoxLayout" name="verticalLayout">
           <item>
-           <widget class="QListView" name="listView"/>
+           <widget class="QTreeWidget" name="listWidget">
+            <property name="columnCount">
+             <number>4</number>
+            </property>
+            <column>
+             <property name="text">
+              <string notr="true">Function</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string notr="true">Calls</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string notr="true">Inclusive Ms</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string notr="true">Exclusive Ms</string>
+             </property>
+            </column>
+           </widget>
           </item>
          </layout>
         </widget>
        </widget>
       </item>
       <item>
-       <widget class="QTextEdit" name="sourceCode"/>
+       <widget class="QTreeWidget" name="instructionCounts">
+        <property name="columnCount">
+         <number>2</number>
+        </property>
+        <column>
+         <property name="text">
+          <string notr="true">Address</string>
+         </property>
+        </column>
+        <column>
+         <property name="text">
+          <string notr="true">Ms</string>
+         </property>
+        </column>
+       </widget>
       </item>
      </layout>
     </item>
@@ -121,26 +153,6 @@
    </property>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
-  <action name="load">
-   <property name="text">
-    <string>Load script...</string>
-   </property>
-  </action>
-  <action name="loadMostRecent">
-   <property name="text">
-    <string>&amp;Load most recent</string>
-   </property>
-  </action>
-  <action name="reset">
-   <property name="text">
-    <string>&amp;Reset</string>
-   </property>
-  </action>
-  <action name="action0">
-   <property name="text">
-    <string>0</string>
-   </property>
-  </action>
  </widget>
  <resources/>
  <connections/>

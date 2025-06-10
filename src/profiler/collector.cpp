@@ -7,6 +7,8 @@ std::map<void*, uint64_t> instructionMap;
 std::vector<functionEntry*> functionList;
 std::vector<stackFrame*> callStack;
 std::map<functionEntry*, functionStats*> functionCounts;
+std::map<void*, uint64_t> functionInstructions;
+
 
 callTreeNode* callTree = nullptr;
 callTreeNode* currentNode = nullptr;
@@ -17,6 +19,34 @@ const std::map<void*, uint64_t>& GetInstructionMap()
 {
 	return instructionMap;
 }
+
+const std::map<void*, uint64_t>& GetInstructionsForFunction(const char* functionName)
+{
+	functionInstructions.clear();
+
+	//Find function
+	for (int i = 0; i < functionList.size(); i++)
+	{
+		functionEntry* function = functionList[i];
+
+		if (function->name == functionName)
+		{
+			// Find instructions for function
+			uint32_t start = function->base_addr;
+
+			for (int i = 0; i < function->length; i++)
+			{
+				if (instructionMap.count((void*)(i + start)) > 0)
+				{
+					functionInstructions[(void*) (i + start)] = instructionMap[(void*) (i + start)];
+				}
+			}
+		}
+	}
+
+	return functionInstructions;
+}
+
 
 const std::map<functionEntry*, functionStats*>& GetFunctionCounts()
 {
@@ -84,6 +114,20 @@ static bool checkCall(void* instr, void* linkReg, uint32_t cycles)
 
 	currentNode->cycleCount += cycles;
 
+	if (!functionCounts.count(thisFunction))
+		functionCounts[thisFunction] = new functionStats();
+
+	functionCounts[thisFunction]->cycles += cycles;
+
+
+	callTreeNode* n = currentNode;
+
+	while (n)
+	{
+		n->inclusiveCycleCount += cycles;
+		n = n->parentNode;
+	}
+
 	if (frame && frame->function == thisFunction)
 		return true;
 
@@ -124,6 +168,8 @@ static bool checkCall(void* instr, void* linkReg, uint32_t cycles)
 	}
 	currentNode = currentNode->childNodes[thisFunction];
 	currentNode->callCount++;
+
+	functionCounts[thisFunction]->callCount++;
 
 	return true;
 }

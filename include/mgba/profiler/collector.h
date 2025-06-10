@@ -30,11 +30,12 @@ typedef struct callTreeNode {
 	callTreeNode* parentNode = nullptr;
 	unsigned int callCount = 0;
 	uint64_t cycleCount = 0;
+	uint64_t inclusiveCycleCount = 0;
 	functionEntry* function = nullptr;
 };
 
 const std::map<void*, uint64_t>& GetInstructionMap();
 const std::map<functionEntry*, functionStats*>& GetFunctionCounts();
 const callTreeNode* GetCallTree();
-
+const std::map<void*, uint64_t>& GetInstructionsForFunction(const char* functionName);
 #endif

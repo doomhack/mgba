@@ -1,6 +1,7 @@
 #pragma once
 
  #include <QTreeWidget>
+ #include <QTableWidget>
 
 #include <mgba/profiler/collector.h>
 
@@ -20,5 +21,11 @@ private:
 	QTreeWidgetItem* buildCallTreeViewRecursive(const callTreeNode* node, QTreeWidgetItem* parent);
 
 	Ui::ProfilerView m_ui;
+
+	const int cpuToMs = 16778;
+
+private slots:
+	void onFunctionSelected(QTreeWidgetItem* item, int column);
+
 };
 }
