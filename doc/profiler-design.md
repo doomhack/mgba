@@ -1,6 +1,6 @@
 # GBA Profiler: Design
 
-Status: accepted, objectives set 2026-10-10, implementation not started.
+Status: accepted, objectives set 2026-10-10. Milestone 1 implemented 2026-10-10.
 Branch: `profiler`, based on upstream `master` at `143adf5aa`.
 
 This is an independent fork. It is developed without coordination with upstream, but structured so that upstream could merge it unchanged if they ever chose to (see "Keeping the fork adoptable").
@@ -93,7 +93,7 @@ bool mDebuggerProfilerExportCallgrind(struct mDebuggerProfiler*, struct VFile*);
 
 Because it is a module, it coexists with the CLI debugger, the GDB stub and the access logger, and it attaches the same way in every frontend (in Qt, `CoreController::attachDebuggerModule`). The profiler doesn't use the debugger's stack trace, so it can't interfere with the CLI debugger's backtraces. While emulation is paused at a breakpoint, emulated time doesn't advance, so nothing is charged.
 
-The module needs the PC, CPSR, SP and LR after each step, cheaply. `nextInstructionInfo` decodes the instruction, which is exactly the inline work to avoid, and `core->readRegister` looks registers up by name. So the debugger platform gains a small accessor that copies the current register values into a struct (decision D1):
+The module needs the PC, CPSR, SP and LR after each step, cheaply. `nextInstructionInfo` only provides the address and width (plus access flags the profiler doesn't need), and `core->readRegister` looks registers up by name. So the debugger platform gains a small accessor that copies the current register values into a struct (decision D1):
 
 ```c
 struct mDebuggerRegisterSnapshot {
@@ -176,7 +176,9 @@ Each step's `delta` comes from `mTimingGlobalTime`, not `cpu->cycles`. It covers
 **Symbols (consumer and afterwards).**
 
 - Source: an ELF file. By default this is the loaded ROM if it is an ELF, otherwise `<rom basename>.elf` next to the ROM if present. Otherwise the user chooses one (Qt) or names it with `profile symbols FILE` (CLI debugger).
-- Read `.symtab` with the existing `mgba-util/elf.h` helpers, keeping `STT_FUNC` entries with their `st_size`. Clear bit 0 of `st_value` (it marks Thumb functions).
+- Read `.symtab` with a small built-in ELF32 reader (`profile-elf.c`), not mGBA's `mgba-util/elf-read.h`. That wrapper needs libelf, which many builds don't have, including MSVC builds without vcpkg's libelf, so profiling would silently lose its symbols there (decision D3).
+- Keep `STT_FUNC` entries in code sections with their `st_size`, plus global untyped labels in code sections, which is how hand-written assembly without a `.type` directive appears. Clear bit 0 of `st_value` (it marks Thumb functions).
+- Unsized symbols run to the next symbol or the end of their section. When several symbols share an address, one is kept: a function over a label, global over weak over local, a name without a leading underscore, then the shorter name. A label inside a sized function is dropped as part of that function.
 - Fold linker veneers (`__*_from_thumb`, `__*_from_arm`, `__*_veneer`) into the function they jump to, so they don't appear as extra levels in the call tree.
 - Keep the functions in an array sorted by address. The consumer looks up branch targets with a last-hit cache first, then binary search.
 - Fallbacks when there is no symbol: `[BIOS]` for 0x00000000–0x00003FFF, otherwise `[unknown <region>]` for each memory region (ROM, IWRAM, EWRAM), so cycles are never dropped.
@@ -190,7 +192,7 @@ Each step's `delta` comes from `mTimingGlobalTime`, not `cpu->cycles`. It covers
 - A name that fails to demangle is shown mangled, never dropped.
 - Whatever text the demangler produces is shown as-is. No attempt is made to match GCC's `c++filt` formatting exactly, since that would only add something to break when either side changes.
 - Template-heavy names get very long, so the views offer a short form that drops template arguments and parameter lists (`bn::sprite_ptr::set_position`), with the full name in a tooltip and in exports.
-- Callgrind exports contain mangled names. KCachegrind demangles them itself.
+- Callgrind exports contain mangled names. Whether KCachegrind/QCachegrind demangle them for display hasn't been checked yet.
 
 **Compiler clones.** GCC emits specialised or split copies of a function as separate symbols with a suffix: `.constprop.N` and `.isra.N` (specialised copies), `.part.N` (the remainder after partial inlining), `.cold` (rarely-taken code moved out of the function), and `.lto_priv.N` (LTO-local). These are real, separate code and are useful insight into what the compiler did, so by default each is its own function in the profile (decision D12).
 
@@ -318,6 +320,7 @@ The export loses the per-path tree, as any callgrind file must; that's what the 
 **CLI debugger** (the SDL frontend's `-d` debugger, and Qt's debugger console), implemented in `cli-debugger.c` on the module API:
 
 ```
+profile                  Show status: recording or not, symbols, recorded vs elapsed cycles, frames
 profile start            Start recording (attaches the profiler if needed)
 profile stop             Stop recording; results are kept
 profile reset            Discard results
@@ -507,9 +510,9 @@ Worth trying once the source view exists, but riskier and more maintenance for a
 
 Where there was a choice, the option that touches the least shared code wins, because that is what keeps the fork adoptable.
 
-- **D1. Hook point.** A debugger module using `needsCallback`, not a new per-instruction hook in the CPU. It forces one `step` per instruction while profiling, which costs wall-clock speed only. A small `registerSnapshot` accessor on `mDebuggerPlatform` is added, because the existing ways to read registers either decode the instruction or look registers up by name.
+- **D1. Hook point.** A debugger module using `needsCallback`, not a new per-instruction hook in the CPU. It forces one `step` per instruction while profiling, which costs wall-clock speed only. A small `registerSnapshot` accessor on `mDebuggerPlatform` is added, because the existing ways to read registers either don't provide SP, LR and the status register, or look registers up by name.
 - **D2. DMA, halt and SWI counters.** Small counters in `struct GBA`, updated behind one `enabled` check and compiled only with `ENABLE_DEBUGGERS`. There's no way to observe this from outside the core, and this is the smallest change that makes it possible.
-- **D3. Symbols.** The profiler reads the ELF symbol table itself through `mgba-util/elf.h`. `mDebuggerSymbols` stays unchanged.
+- **D3. Symbols.** The profiler reads the ELF symbol table itself, with a built-in ELF32 reader that has no dependencies, rather than through `mgba-util/elf-read.h`, which needs libelf and is compiled out of builds without it. `mDebuggerSymbols` stays unchanged.
 - **D4. File formats.** A native text format (`.mprof`) for save and open, because callgrind can't store the call tree. Callgrind as an export for KCachegrind/QCachegrind.
 - **D5. Call reconstruction.** The profiler rebuilds calls, returns and interrupts itself on the consumer, from actual branch targets and registers. It doesn't use the ARM debugger's stack trace, which runs inline, decodes every instruction and predicts targets. The cost is owning this logic; the benefits are less inline work, more reliable results, and no interference with the CLI debugger.
 - **D6. UI placement.** A Tools → Profiler window, in the same style as the memory access logger.
