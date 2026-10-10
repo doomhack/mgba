@@ -349,9 +349,10 @@ Kept deliberately small, each in its own commit:
 None beyond adding files to existing lists:
 
 - `src/debugger/CMakeLists.txt`: add `profiler.c` (module and producer) and `profile.c` (consumer, data model, file formats) to `SOURCE_FILES`, and the tests to `TEST_FILES`.
-- `src/platform/qt/CMakeLists.txt`: add the new controller and view sources and the `.ui` file to the existing lists.
+- `src/platform/qt/CMakeLists.txt`: add the new controller and view sources and the `.ui` file to the existing lists, and link the demangler library.
+- `src/third-party/llvm-demangle/`: the vendored demangler with its license file, and a few lines of CMake building it as a small static library with `CXX_STANDARD 17`. LLVM's demangler needs C++17, while the Qt frontend is built as C++14, so it gets its own target rather than changing the frontend's standard.
 
-There is no new option: the profiler is part of `ENABLE_DEBUGGERS` and needs no third-party code. ELF symbol loading uses the existing `USE_ELF` support. Without it, the profiler still works with the region-based fallbacks.
+There is no new option: the profiler is part of `ENABLE_DEBUGGERS`. The core library needs no third-party code; the only vendored code is the demangler, used by the Qt frontend alone. ELF symbol loading uses the existing `USE_ELF` support. Without it, the profiler still works with the region-based fallbacks.
 
 ## Performance
 
