@@ -1,6 +1,6 @@
 # GBA Profiler: Design
 
-Status: accepted, objectives set 2026-10-10. Milestone 1 implemented 2026-10-10.
+Status: accepted, objectives set 2026-10-10. Milestone 1 implemented 2026-10-10, milestone 2 on 2026-10-11.
 Branch: `profiler`, based on upstream `master` at `143adf5aa`.
 
 This is an independent fork. It is developed without coordination with upstream, but structured so that upstream could merge it unchanged if they ever chose to (see "Keeping the fork adoptable").
@@ -215,6 +215,14 @@ The consumer keeps a shadow call stack. Each frame holds its tree node, the retu
 
 Because the target is known rather than predicted, this doesn't need the instruction's opcode, and it works for hand-written assembly with unusual return sequences as long as control eventually reaches an expected return address.
 
+**Cases found on real code.** Running GBADoom and the test ROM in milestone 2 turned up patterns the rules above get wrong on their own. Each one showed up as fake recursion, so `recursiveCalls` on a function that doesn't recurse is the symptom to look for:
+
+- **Function-pointer stubs.** Thumb code compiled by GCC calls through a pointer with a `BL` to a `bx rN` stub. The stub is either a named `_call_via_rN`, a local stub inside the calling function, or an unnamed one just past the end of a function. The LR rule sees a call to the stub, but the callee is wherever the stub jumps. So a `BL` to a trampoline symbol, to the middle of the calling function, or to code with no symbol pushes a *pending* frame. The frame is resolved by the stub's own jump: the callee is entered as a child of the caller and the stub never appears. A `BL` to the start of the calling function is still ordinary recursion.
+- **`BL` as a long jump.** Thumb `B` has a short range, so GCC sometimes uses `BL` to jump within a function, and nothing ever returns to it. If the first jump after a pending frame isn't from the stub address, the frame was a jump, not a call, and it is discarded. If the target had no symbol, it was a real call into unsymbolled code after all. The frame is then entered as a call to that region's pseudo-function.
+- **Jumps hidden by interrupts.** An interrupt can be taken straight after a branch, in the same step, so the producer sees one event from the branch instruction to the IRQ vector and never sees the branch target. On interrupt exit, if the resume address isn't the instruction after the interrupted one, the hidden jump is replayed as its own event with the restored registers. That way a `BL` taken just before an interrupt is still seen as a call.
+- **BIOS calling itself.** The BIOS (and any other code without symbols) calls its own routines, for example `VBlankIntrWait` with mGBA's HLE BIOS. A call from a pseudo-function to the same pseudo-function pushes a *transparent* frame: it is tracked so its return is recognized, but it doesn't count as a call or change the node.
+- **Exceptions are never stubs.** An SWI enters the BIOS through its vector, whose first instruction is a branch. That looks like a stub into unsymbolled code, but an exception always enters the code it goes to.
+
 **Contexts.** If there's an interrupt marker on the shadow stack, the sample belongs to the IRQ context: its path is the frames above the topmost marker, under a synthetic `[IRQ]` root. Otherwise it belongs to the main context, under the program root. A nested interrupt (handlers that re-enable IRQs, such as libtonc's nested dispatcher, which switches to System mode) pushes a second marker, so its handler appears under `[IRQ]` again rather than inside the first handler. The test ROM covers this case.
 
 **The tree.** Nodes are keyed by `(parent, function)`. The current node only changes on events, so charging cycles is one add on the current node.
@@ -355,6 +363,13 @@ Kept deliberately small, each in its own commit:
 3. GBA core: `GBAProfileCounters` and the updates in `dma.c`, `gba.c` and the HLE BIOS (§6), compiled under `ENABLE_DEBUGGERS` (D2).
 4. CLI debugger: the `profile` command set.
 
+Using the profiler also turned up some bugs in shared code. Each fix is small and useful without the profiler:
+
+- `mDebuggerRunTimeout` set the state to `DEBUGGER_RUNNING` when leaving a pause, so a module that needs per-instruction callbacks stopped getting them after "continue". It now recomputes the state.
+- The Qt debugger console ignored commands typed while the debugger was in `DEBUGGER_CALLBACK` state.
+- `mgba-util/common.h` defined `restrict` as `__restrict` for MSVC C++, which breaks Qt 6.12's use of `__declspec(restrict)`.
+- On Windows, `ThreadCreate` returned `GetLastError()` even when the thread was created, so a stale error code made a running thread look like a failure. The profiler then drained its queue on the emulation thread while the consumer thread was still running.
+
 ## Build changes
 
 None beyond adding files to existing lists:
@@ -386,6 +401,8 @@ Target (objective 6): 50% of full speed or better for GBADoom on the author's ma
 
 The step-per-instruction loop costs about 3.5×, and the producer's own work about 13% on top, leaving roughly six times the target. GBADoom ran about 116,000 instructions per frame, with one branch event per 18.3 instructions, so the event stream is about 380,000 events (12 MB) per emulated second. The consumer thread's load and the Qt frontend's rendering aren't included, and debug builds will be slower, but there's plenty of headroom.
 
+**Measured with the call tree (milestone 2, 2026-10-11).** GBADoom (shareware), 1,800 frames, with the full producer, the event ring and the consumer thread building the call tree: 238% of full speed. The tree's cycles, the per-instruction counters and the elapsed time agree exactly.
+
 If later measurements miss the target, the fixes in order of increasing invasiveness are:
 
 1. Profile the producer and fix whatever is slow in it.
@@ -403,6 +420,7 @@ If later measurements miss the target, the fixes in order of increasing invasive
   - `.mprof` files round-trip exactly (save, load, compare equal), and the callgrind export's totals match the profile's.
 - **Pipeline tests**: the same event stream through the threaded path with a deliberately tiny ring (forcing backpressure), and through a single-threaded drain, gives identical profiles. Also: per-function self cycles from the instruction counters equal those from the tree.
 - **Test ROM**: a small devkitARM program with known cycle costs: fixed loops, nested calls, a timer IRQ (plain and nested), immediate and HBlank DMA, `VBlankIntrWait`, and a long-call veneer. Its source and a prebuilt binary are committed, so running the tests doesn't need devkitARM. A cmocka test loads it into a GBA core in-process, attaches the profiler, runs a fixed number of frames, and checks the profile against the expected buckets to within a tolerance (objectives 2 and 3).
+  - The milestone 2 version (`src/debugger/test/profile-rom/`) covers the call tree and interrupts: leaf calls, direct and mutual recursion, a function-pointer call, a tail call, ARM code in IWRAM called through a veneer, and HBlank interrupts nested inside a slow timer interrupt. The test checks exact call counts and tree shape, that recursion is reported only where the code really recurses, and that handlers appear only under `[IRQ]`. DMA, halt and SWI cases follow with milestone 3. Three things the ROM has to work around: GCC turns repeated calls to a pure function into one call unless the function has a side effect; Thumb GCC rarely emits a real tail call, so that one is written in ARM assembly; and libgba's interrupt dispatcher runs handlers with `IME` cleared, so the timer handler sets it again to allow nesting. `make` in that directory rebuilds the ROM and the `profile-rom.h` header the test embeds.
 - **Names**: clone-suffix splitting (C and C++ names, each suffix kind, names without a suffix) and short-name derivation, both of which are the profiler's own code. For the demangler, a list of mangled names taken from a real C++ project (for example a Butano build) checks only that each one demangles to something that isn't the mangled input, or falls back cleanly, without crashing. The test doesn't compare against `c++filt`'s exact text. The test ROM includes one C++ translation unit and one function GCC clones, so the end-to-end test sees both.
 - **Regression against the prototype**: profile the same build of a real project (for example GBADoom) with both and compare the top functions. Differences should be explainable by the IRQ/DMA fixes.
 
