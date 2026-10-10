@@ -414,6 +414,7 @@ Candidates, in no particular order:
   - *Compare:* matching by base name, since clone numbers (`.constprop.0` vs `.constprop.1`) can change between builds even when the code didn't.
   - Implemented as a derived view in the core library, so the CLI debugger can offer it too.
 - **Demangling in the SDL CLI debugger:** a C demangler covering the common subset of the Itanium scheme, falling back to the mangled name, so C-only frontends can register it through the same hook.
+- **Profile-guided optimisation (PGO).** Let GCC's PGO be used for GBA games, with mGBA collecting the profile. See "Future: profile-guided optimisation" below.
 - **Raw trace recording:** write the event stream to a file and analyse it later. It's roughly 20 MB per emulated second, so it's for short captures, but it allows re-analysing one run with different settings, for example with recursion unfolded, without recording again.
 - Headless profiling through `mgba-perf` (`--profile FILE`) for scripts and CI; Lua bindings.
 - Input recording for reproducible comparisons.
@@ -422,6 +423,72 @@ Candidates, in no particular order:
 - An option to record recursion unfolded.
 - A speedscope exporter for flame graphs.
 - Game Boy support.
+
+## Future: profile-guided optimisation
+
+GCC can optimise using a profile of how the program actually ran: block ordering, inlining, hot/cold splitting, value profiling. There are two ways to produce that profile for a GBA game. Route 1 is the recommended one.
+
+### Route 1: instrumented PGO, with mGBA as the bridge
+
+Standard `-fprofile-generate` / `-fprofile-use`. The game counts its own branches, and mGBA solves the two problems a GBA has with this: nowhere to keep the counters, and no filesystem to write them to.
+
+**What devkitARM provides.** GCC 12 added support for profiling on systems without a filesystem, and devkitARM's GCC 16.1 has all of it (checked):
+
+- `-fprofile-info-section` collects pointers to each source file's profiling data into a `.gcov_info` linker section, so the program can walk them without constructors or file I/O.
+- `__gcov_info_to_gcda()` and `__gcov_filename_to_gcfn()` (`gcov.h`, `libgcov.a`) serialise that data through a callback, in small chunks, with no buffer needed.
+- `arm-none-eabi-gcov-tool merge-stream` turns the resulting byte stream into ordinary `.gcda` files on the PC, adding to existing ones. Several play sessions can therefore be merged into one profile.
+
+**The memory problem.** Measured with GCC 16.1 (`-O2 -mthumb -fprofile-generate -fprofile-info-section -fdata-sections`), the instrumented build needs:
+
+- counters: 8 bytes per instrumented branch, in per-function sections `.bss.__gcov0.<function>` (plus `.bss.__gcov3/7.*` for value and timing profiling);
+- metadata: 56 bytes per function in `.data.__gcov_.<function>`, plus a small `gcov_info` record per source file in `.data..LPBX0`/`.LPBX1`. As `.data`, it would normally be copied from ROM to RAM at startup too.
+
+As an estimate, a game with 1,500 functions and 15,000 counters needs about 80 KB of metadata and 120 KB of counters. That's too much for a game already using most of its 256 KB EWRAM.
+
+**Debug RAM: an emulator-only memory region.** Most of the GBA address space is unmapped. When profiling mode is enabled in mGBA, it maps a block of RAM at an unused address, for example region `0x01000000` (1 MB by default, configurable up to the region's 16 MB):
+
+- The game's linker script places `.bss.__gcov*` there. That needs `-fdata-sections` so the counters get their own sections. mGBA zero-fills the block on reset, so the game's startup code doesn't change.
+- The metadata stays in ROM if nothing writes it at runtime, which should be true with `-fprofile-info-section` (no registration constructor) but must be verified. If it turns out to be written, it goes in debug RAM too, with a small copy step at startup.
+- It's enabled by an mGBA setting, not by the game, because counting has to work from the first instruction, before the game could enable anything.
+- It's visible in the debugger's memory views and included in save states (as extra state data), so loading a state doesn't lose counts.
+- Result: the game's own memory layout is unchanged and no GBA RAM is used. Only ROM grows, by the instrumentation code and the metadata.
+- The instrumented build only works in mGBA. On hardware, counter reads return open-bus values, so the counts are meaningless, but the game should still run. It's a profiling-only build anyway.
+
+**Getting the data out: a binary stream port.** mGBA already has a debug port in unused I/O space: write `0xC0DE` to `0x04FFF780` to enable it (it reads back `0x1DEA`), put text in the 256-byte buffer at `0x04FFF600`, and write the send flag to `0x04FFF700` to emit a log line. It's text-only, since `GBADebug` copies the buffer with `strncpy`. Two new registers in the same page add a binary channel:
+
+- **Stream control:** begin a stream, end a stream.
+- **Stream data:** 8-, 16- or 32-bit writes append bytes to the open stream.
+
+They're only active while the debug interface is enabled. The bytes are passed to the frontend through a callback, and the frontend writes each stream to a file named after the ROM. mGBA never interprets the contents.
+
+**The game side.** A small runtime file provided by the fork (in `res/pgo/`, with a linker script fragment and build instructions) that:
+
+1. enables the debug port and checks for `0x1DEA`;
+2. walks the `.gcov_info` section, calling `__gcov_info_to_gcda` for each entry, with callbacks that write `__gcov_filename_to_gcfn` output and data chunks straight to the stream data register;
+3. is called by the game wherever it chooses: after a benchmark, after N frames, or on a button combination.
+
+**Workflow.**
+
+1. Build with `-fprofile-generate -fprofile-info-section -fprofile-update=single -fdata-sections`, plus the runtime file and linker script fragment.
+2. Run in mGBA with profiling mode on, play the scenes that matter, and trigger the dump.
+3. `arm-none-eabi-gcov-tool merge-stream <stream file>` produces `.gcda` files.
+4. Rebuild with `-fprofile-use`.
+
+To keep instrumentation smaller, `-fprofile-generate` can be applied to selected source files only; files without profile data are simply optimised normally.
+
+**Side benefit: code coverage.** The same mechanism works with `--coverage`, giving `gcov`/`lcov` coverage reports for GBA code.
+
+**Changes to shared mGBA code.** Two, both off by default and each in its own commit: the debug RAM region (one extra case in the GBA memory access paths, plus memory-view and save-state support), and the stream registers. Neither is PGO-specific: extra RAM for debug builds, and a binary channel for dumping logs, screenshots or test results, are useful to any homebrew developer. Neither depends on the profiler module, so this can be built independently of the profiler milestones.
+
+### Route 2: AutoFDO from the profiler's own data (experimental)
+
+GCC's `-fauto-profile` optimises a normal build using a sampled profile, usually from hardware performance counters. The profiler's per-instruction counts are exact, so in principle they'd be a better input than samples, and no instrumented build or game-side code would be needed. But:
+
+- It needs much more DWARF than the source view: the line table with discriminators, plus `.debug_info` to know what was inlined where.
+- GCC's AutoFDO file format is effectively defined by GCC's source code and has changed between versions, so it would need ongoing maintenance to keep up.
+- GCC's AutoFDO has historically been less mature than instrumented PGO, and its recent improvements have mainly targeted x86 and AArch64.
+
+Worth trying once the source view exists, but riskier and more maintenance for a smaller gain than Route 1.
 
 ## Decisions
 
