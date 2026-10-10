@@ -16,6 +16,18 @@
 #define MPROF_MAGIC "mprof"
 #define MPROF_VERSION 1
 
+struct mProfileSavedNode {
+	int64_t parent;
+	int64_t function;
+	uint64_t calls;
+	uint64_t recursiveCalls;
+	uint64_t selfCycles;
+	uint64_t selfExecutions;
+};
+
+DECLARE_VECTOR(mProfileSavedNodeList, struct mProfileSavedNode);
+DEFINE_VECTOR(mProfileSavedNodeList, struct mProfileSavedNode);
+
 ATTRIBUTE_FORMAT(printf, 2, 3)
 static bool _writef(struct VFile* vf, const char* format, ...) {
 	char buffer[1024];
@@ -110,6 +122,18 @@ bool mProfileSave(const struct mProfile* profile, struct VFile* vf) {
 	if (profile->other.executions) {
 		_writef(vf, "other %" PRIu64 " %" PRIu64 "\n", profile->other.cycles, profile->other.executions);
 	}
+
+	// Nodes in index order; function IDs count symbols first, then pseudo-functions
+	for (i = 0; i < mProfileNodeListSize(&profile->nodes); ++i) {
+		const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		int64_t parent = node->parent == mPROFILE_NONE ? -1 : (int64_t) node->parent;
+		_writef(vf, "node %" PRIi64 " %u %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", parent, node->function,
+		        node->calls, node->recursiveCalls, node->selfCycles, node->selfExecutions);
+	}
+	for (i = 0; i < mProfileEdgeListSize(&profile->recursion); ++i) {
+		const struct mProfileEdge* edge = mProfileEdgeListGetConstPointer(&profile->recursion, i);
+		_writef(vf, "recursion %u %u %" PRIu64 "\n", edge->caller, edge->callee, edge->recursiveCalls);
+	}
 	return _writef(vf, "end\n");
 }
 
@@ -135,7 +159,7 @@ static const char* _rest(const char* cursor) {
 
 static void _setString(char** destination, const char* value) {
 	free(*destination);
-	*destination = strdup(value);
+	*destination = value ? strdup(value) : NULL;
 }
 
 static bool _loadMeta(struct mProfile* profile, const char* cursor) {
@@ -173,16 +197,11 @@ static bool _loadFunction(struct mProfile* profile, const char* cursor) {
 		// Functions must be sorted for lookups
 		return false;
 	}
-	struct mProfileFunction* function = mProfileFunctionListAppend(&profile->functions);
-	memset(function, 0, sizeof(*function));
-	function->name = strdup(name);
-	const char* dot = strchr(name, '.');
-	function->baseLength = dot ? (size_t) (dot - name) : strlen(name);
+	struct mProfileFunction* function = mProfileAppendSymbol(profile, name);
 	function->start = start;
 	function->size = size;
 	function->thumb = thumb;
 	function->foldInto = foldInto;
-	++profile->symbolCount;
 	return true;
 }
 
@@ -200,6 +219,65 @@ static bool _loadCounter(struct mProfile* profile, const char* cursor, bool othe
 	return true;
 }
 
+static bool _loadNode(struct mProfileSavedNodeList* nodes, const char* cursor) {
+	struct mProfileSavedNode* node = mProfileSavedNodeListAppend(nodes);
+	node->parent = strtoll(_field(&cursor), NULL, 10);
+	node->function = strtoll(_field(&cursor), NULL, 10);
+	node->calls = strtoull(_field(&cursor), NULL, 10);
+	node->recursiveCalls = strtoull(_field(&cursor), NULL, 10);
+	node->selfCycles = strtoull(_field(&cursor), NULL, 10);
+	node->selfExecutions = strtoull(_field(&cursor), NULL, 10);
+	return true;
+}
+
+static bool _applyNodes(struct mProfile* profile, const struct mProfileSavedNodeList* saved) {
+	int64_t functionCount = mProfileFunctionListSize(&profile->functions);
+	size_t i;
+	for (i = 0; i < mProfileSavedNodeListSize(saved); ++i) {
+		const struct mProfileSavedNode* source = mProfileSavedNodeListGetConstPointer(saved, i);
+		struct mProfileNode* node;
+		if (i <= mPROFILE_ROOT_IRQ) {
+			// The roots already exist
+			if (source->parent != -1) {
+				return false;
+			}
+			node = mProfileNodeListGetPointer(&profile->nodes, i);
+		} else {
+			if (source->parent < 0 || (size_t) source->parent >= i || source->function < 0 ||
+			    source->function >= functionCount) {
+				return false;
+			}
+			uint32_t index = mProfileGetChild(profile, source->parent, source->function);
+			if (index != i) {
+				// Two saved nodes with the same parent and function
+				return false;
+			}
+			node = mProfileNodeListGetPointer(&profile->nodes, index);
+		}
+		node->calls = source->calls;
+		node->recursiveCalls = source->recursiveCalls;
+		node->selfCycles = source->selfCycles;
+		node->selfExecutions = source->selfExecutions;
+	}
+	return true;
+}
+
+static bool _loadRecursion(struct mProfile* profile, const char* cursor) {
+	int64_t functionCount = mProfileFunctionListSize(&profile->functions);
+	int64_t caller = strtoll(_field(&cursor), NULL, 10);
+	int64_t callee = strtoll(_field(&cursor), NULL, 10);
+	uint64_t count = strtoull(_field(&cursor), NULL, 10);
+	if (caller < 0 || caller >= functionCount || callee < 0 || callee >= functionCount) {
+		return false;
+	}
+	mProfileAddRecursion(profile, caller, callee, count);
+	return true;
+}
+
+static bool _isRecord(const char* type, size_t length, const char* name) {
+	return length == strlen(name) && strncmp(type, name, length) == 0;
+}
+
 bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 	ssize_t size = vf->size(vf);
 	if (size <= 0) {
@@ -214,11 +292,21 @@ bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 	text[size] = '\0';
 
 	mProfileClear(profile);
-	mProfileClearSymbols(profile);
+	mProfileBeginSymbols(profile);
 	unsigned region;
 	for (region = 0; region < mPROFILE_REGIONS; ++region) {
-		mProfileSetRegionName(profile, region, NULL);
+		_setString(&profile->regionNames[region], NULL);
 	}
+	_setString(&profile->symbolSource, NULL);
+	_setString(&profile->romTitle, NULL);
+	_setString(&profile->idleOptimization, NULL);
+	profile->romCrc32 = 0;
+
+	struct mProfileSavedNodeList nodes;
+	mProfileSavedNodeListInit(&nodes, 0);
+	// Recursion records refer to function IDs, which only exist once all functions are loaded
+	char** recursion = NULL;
+	size_t recursionCount = 0;
 
 	bool success = false;
 	bool first = true;
@@ -238,21 +326,28 @@ bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 		size_t typeLength = cursor - type;
 		bool ok = true;
 		if (first) {
-			ok = typeLength == strlen(MPROF_MAGIC) && strncmp(type, MPROF_MAGIC, typeLength) == 0 &&
-			    strtol(cursor, NULL, 10) >= 1;
+			ok = _isRecord(type, typeLength, MPROF_MAGIC) && strtol(cursor, NULL, 10) >= 1;
 			first = false;
-		} else if (typeLength == 4 && strncmp(type, "meta", typeLength) == 0) {
+		} else if (_isRecord(type, typeLength, "meta")) {
 			ok = _loadMeta(profile, cursor);
-		} else if (typeLength == 6 && strncmp(type, "region", typeLength) == 0) {
+		} else if (_isRecord(type, typeLength, "region")) {
 			unsigned index = strtoul(_field(&cursor), NULL, 10);
-			mProfileSetRegionName(profile, index, _rest(cursor));
-		} else if (typeLength == 4 && strncmp(type, "func", typeLength) == 0) {
+			if (index < mPROFILE_REGIONS) {
+				_setString(&profile->regionNames[index], _rest(cursor));
+			}
+		} else if (_isRecord(type, typeLength, "func")) {
 			ok = _loadFunction(profile, cursor);
-		} else if (typeLength == 5 && strncmp(type, "count", typeLength) == 0) {
+		} else if (_isRecord(type, typeLength, "count")) {
 			ok = _loadCounter(profile, cursor, false);
-		} else if (typeLength == 5 && strncmp(type, "other", typeLength) == 0) {
+		} else if (_isRecord(type, typeLength, "other")) {
 			ok = _loadCounter(profile, cursor, true);
-		} else if (typeLength == 3 && strncmp(type, "end", typeLength) == 0) {
+		} else if (_isRecord(type, typeLength, "node")) {
+			ok = _loadNode(&nodes, cursor);
+		} else if (_isRecord(type, typeLength, "recursion")) {
+			recursion = realloc(recursion, sizeof(*recursion) * (recursionCount + 1));
+			recursion[recursionCount] = (char*) cursor;
+			++recursionCount;
+		} else if (_isRecord(type, typeLength, "end")) {
 			success = true;
 			break;
 		}
@@ -261,8 +356,8 @@ bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 		}
 		line = next;
 	}
-	free(text);
 
+	mProfileEndSymbols(profile);
 	size_t i;
 	for (i = 0; i < profile->symbolCount; ++i) {
 		struct mProfileFunction* function = mProfileFunctionListGetPointer(&profile->functions, i);
@@ -270,6 +365,16 @@ bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 			function->foldInto = -1;
 		}
 	}
+	if (success) {
+		success = _applyNodes(profile, &nodes);
+	}
+	for (i = 0; success && i < recursionCount; ++i) {
+		success = _loadRecursion(profile, recursion[i]);
+	}
+	free(recursion);
+	mProfileSavedNodeListDeinit(&nodes);
+	free(text);
+
 	if (!success) {
 		mProfileClear(profile);
 		mProfileClearSymbols(profile);
@@ -282,40 +387,21 @@ bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 struct mProfileCallgrindState {
 	const struct mProfile* profile;
 	struct VFile* vf;
-	ssize_t lastFunction;
+	uint32_t lastFunction;
 };
 
-static ssize_t _pseudoFunction(const struct mProfile* profile, uint32_t address) {
-	// Pseudo-functions cover whole regions, so the most specific (latest added) match wins
-	size_t i;
-	for (i = mProfileFunctionListSize(&profile->functions); i > profile->symbolCount; --i) {
-		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, i - 1);
-		if (address - function->start < function->size) {
-			return i - 1;
-		}
-	}
-	return -1;
+static const char* _name(const struct mProfile* profile, uint32_t function) {
+	return mProfileFunctionListGetConstPointer(&profile->functions, function)->name;
 }
 
 static bool _exportCounter(uint32_t address, const struct mProfileCounter* counter, void* user) {
 	struct mProfileCallgrindState* state = user;
-	ssize_t index = mProfileFindFunction(state->profile, address);
-	if (index >= 0) {
-		const struct mProfileFunction* function =
-		    mProfileFunctionListGetConstPointer(&state->profile->functions, index);
-		if (function->foldInto >= 0) {
-			index = function->foldInto;
-		}
-	} else {
-		index = _pseudoFunction(state->profile, address);
-	}
-	if (index != state->lastFunction) {
-		const char* name =
-		    index >= 0 ? mProfileFunctionListGetConstPointer(&state->profile->functions, index)->name : "[unknown]";
-		if (!_writef(state->vf, "fn=%s\n", name)) {
+	uint32_t function = mProfileFunctionAt(state->profile, address);
+	if (function != state->lastFunction) {
+		if (!_writef(state->vf, "fn=%s\n", _name(state->profile, function))) {
 			return false;
 		}
-		state->lastFunction = index;
+		state->lastFunction = function;
 	}
 	return _writef(state->vf, "0x%08X %" PRIu64 " %" PRIu64 "\n", address, counter->cycles, counter->executions);
 }
@@ -346,18 +432,38 @@ bool mProfileExportCallgrind(const struct mProfile* profile, struct VFile* vf) {
 	struct mProfileCallgrindState state = {
 		.profile = profile,
 		.vf = vf,
-		.lastFunction = -2,
+		.lastFunction = mPROFILE_NONE,
 	};
 	if (!_visitCounters(profile, _exportCounter, &state)) {
 		return false;
 	}
 	if (profile->other.executions) {
-		ssize_t index = _pseudoFunction(profile, (uint32_t) mPROFILE_REGIONS << 24);
-		const char* name =
-		    index >= 0 ? mProfileFunctionListGetConstPointer(&profile->functions, index)->name : "[unknown]";
-		_writef(vf, "fn=%s\n", name);
+		_writef(vf, "fn=%s\n", _name(profile, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_OTHER)));
 		_writef(vf, "0x%08X %" PRIu64 " %" PRIu64 "\n", (uint32_t) mPROFILE_REGIONS << 24, profile->other.cycles,
 		        profile->other.executions);
+	}
+
+	// Calls, with the inclusive cost of each callee, merged over all call sites
+	uint32_t caller = mPROFILE_NONE;
+	size_t i;
+	for (i = 0; i < mProfileEdgeListSize(&profile->edges); ++i) {
+		const struct mProfileEdge* edge = mProfileEdgeListGetConstPointer(&profile->edges, i);
+		uint64_t calls = edge->calls + edge->recursiveCalls;
+		if (!calls) {
+			continue;
+		}
+		const struct mProfileFunction* from = mProfileFunctionListGetConstPointer(&profile->functions, edge->caller);
+		const struct mProfileFunction* to = mProfileFunctionListGetConstPointer(&profile->functions, edge->callee);
+		if (edge->caller != caller) {
+			_writef(vf, "fn=%s\n", from->name);
+			caller = edge->caller;
+		}
+		_writef(vf, "cfn=%s\n", to->name);
+		_writef(vf, "calls=%" PRIu64 " 0x%08X\n", calls, to->start);
+		if (!_writef(vf, "0x%08X %" PRIu64 " %" PRIu64 "\n", from->start, edge->inclusiveCycles,
+		             edge->inclusiveExecutions)) {
+			return false;
+		}
 	}
 	return true;
 }

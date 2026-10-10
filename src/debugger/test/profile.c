@@ -383,7 +383,470 @@ M_TEST_DEFINE(callgrindExport) {
 	mProfileDeinit(&profile);
 }
 
+// Call tree reconstruction, driven by synthetic event streams like the ones the profiler emits
+
+#define STATUS_THUMB_SYSTEM 0x3F
+#define STATUS_ARM_SYSTEM 0x1F
+#define STATUS_ARM_IRQ 0x92
+
+#define SP_MAIN 0x03007F00
+#define SP_IRQ 0x03007FA0
+
+struct RecorderTest {
+	struct mProfile profile;
+	struct mProfileRecorder recorder;
+	uint64_t charged;
+};
+
+static void _setupProgram(struct RecorderTest* test) {
+	static const struct {
+		const char* name;
+		uint32_t start;
+		uint32_t size;
+	} symbols[] = {
+		{ "handler", 0x03000000, 0x80 },     { "main", 0x08000100, 0x100 },   { "a", 0x08000200, 0x40 },
+		{ "b", 0x08000240, 0x40 },           { "rec", 0x08000280, 0x40 },     { "m1", 0x080002C0, 0x40 },
+		{ "m2", 0x08000300, 0x40 },          { "tailsrc", 0x08000340, 0x40 }, { "taildst", 0x08000380, 0x40 },
+		{ "_call_via_r3", 0x08000400, 0x8 },
+	};
+	memset(test, 0, sizeof(*test));
+	mProfileInit(&test->profile);
+	mProfileBeginSymbols(&test->profile);
+	size_t i;
+	for (i = 0; i < sizeof(symbols) / sizeof(*symbols); ++i) {
+		struct mProfileFunction* function = mProfileAppendSymbol(&test->profile, symbols[i].name);
+		function->start = symbols[i].start;
+		function->size = symbols[i].size;
+	}
+	mProfileEndSymbols(&test->profile);
+	mProfileSetRegionName(&test->profile, 0, "[BIOS]");
+	mProfileRecorderInit(&test->recorder, &test->profile);
+}
+
+static void _teardownProgram(struct RecorderTest* test) {
+	mProfileRecorderDeinit(&test->recorder);
+	mProfileDeinit(&test->profile);
+}
+
+static void _event(struct RecorderTest* test, uint8_t type, uint8_t width, uint32_t cycles, uint32_t from, uint32_t to,
+                   uint32_t sp, uint32_t lr, uint32_t status) {
+	struct mProfileEvent event;
+	memset(&event, 0, sizeof(event));
+	event.type = type;
+	event.width = width;
+	event.cycles = cycles;
+	event.instructions = cycles ? 1 : 0;
+	event.from = from;
+	event.to = to;
+	event.sp = sp;
+	event.lr = lr;
+	event.status = status;
+	mProfileRecorderConsume(&test->recorder, &event);
+	test->charged += cycles;
+}
+
+static void _start(struct RecorderTest* test, uint32_t pc) {
+	_event(test, mPROFILE_EVENT_START, 0, 0, 0, pc, SP_MAIN, 0, STATUS_THUMB_SYSTEM);
+}
+
+// A Thumb BL: LR points just past the instruction that jumped
+static void _call(struct RecorderTest* test, uint32_t cycles, uint32_t from, uint32_t to, uint32_t sp) {
+	_event(test, mPROFILE_EVENT_BRANCH, 2, cycles, from, to, sp, (from + 2) | 1, STATUS_THUMB_SYSTEM);
+}
+
+// Any other jump: a return, a tail call, or a branch
+static void _jump(struct RecorderTest* test, uint32_t cycles, uint32_t from, uint32_t to, uint32_t sp) {
+	_event(test, mPROFILE_EVENT_BRANCH, 2, cycles, from, to, sp, 0, STATUS_THUMB_SYSTEM);
+}
+
+static void _charge(struct RecorderTest* test, uint32_t cycles) {
+	_event(test, mPROFILE_EVENT_CYCLES, 0, cycles, 0, 0, 0, 0, 0);
+}
+
+static uint32_t _functionId(const struct mProfile* profile, const char* name) {
+	ssize_t index = mProfileFindFunctionByName(profile, name);
+	assert_true(index >= 0);
+	return index;
+}
+
+static const struct mProfileNode* _child(const struct mProfile* profile, uint32_t parent, const char* name) {
+	uint32_t function = _functionId(profile, name);
+	size_t i;
+	for (i = 0; i < mProfileNodeListSize(&profile->nodes); ++i) {
+		const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		if (node->parent == parent && node->function == function) {
+			return node;
+		}
+	}
+	fail_msg("No node for %s under node %u", name, parent);
+	return NULL;
+}
+
+static uint32_t _index(const struct mProfile* profile, const struct mProfileNode* node) {
+	return mProfileNodeListIndex(&profile->nodes, node);
+}
+
+static const struct mProfileEdge* _edgeBetween(const struct mProfile* profile, const char* caller, const char* callee) {
+	uint32_t from = _functionId(profile, caller);
+	uint32_t to = _functionId(profile, callee);
+	size_t i;
+	for (i = 0; i < mProfileEdgeListSize(&profile->edges); ++i) {
+		const struct mProfileEdge* edge = mProfileEdgeListGetConstPointer(&profile->edges, i);
+		if (edge->caller == from && edge->callee == to) {
+			return edge;
+		}
+	}
+	fail_msg("No edge from %s to %s", caller, callee);
+	return NULL;
+}
+
+static void _assertAllCharged(struct RecorderTest* test) {
+	uint64_t total = 0;
+	size_t i;
+	for (i = 0; i < mProfileNodeListSize(&test->profile.nodes); ++i) {
+		total += mProfileNodeListGetConstPointer(&test->profile.nodes, i)->selfCycles;
+	}
+	assert_int_equal(total, test->charged);
+}
+
+// main calls a twice; the first time, a calls b
+static void _runCalls(struct RecorderTest* test) {
+	_start(test, 0x08000100);
+	_call(test, 10, 0x08000110, 0x08000200, SP_MAIN);
+	_call(test, 5, 0x08000210, 0x08000240, SP_MAIN - 0x18);
+	_jump(test, 7, 0x08000250, 0x08000212, SP_MAIN - 0x18);
+	_jump(test, 3, 0x08000220, 0x08000112, SP_MAIN);
+	_call(test, 4, 0x08000120, 0x08000200, SP_MAIN);
+	_jump(test, 6, 0x08000222, 0x08000122, SP_MAIN);
+	_charge(test, 2);
+}
+
+M_TEST_DEFINE(recorderCalls) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_runCalls(&test);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	const struct mProfileNode* main = _child(&test.profile, mPROFILE_ROOT_MAIN, "main");
+	const struct mProfileNode* a = _child(&test.profile, _index(&test.profile, main), "a");
+	const struct mProfileNode* b = _child(&test.profile, _index(&test.profile, a), "b");
+	assert_int_equal(main->calls, 1);
+	assert_int_equal(main->selfCycles, 16);
+	assert_int_equal(main->subtreeCycles, 37);
+	assert_int_equal(a->calls, 2);
+	assert_int_equal(a->selfCycles, 14);
+	assert_int_equal(a->subtreeCycles, 21);
+	assert_int_equal(b->calls, 1);
+	assert_int_equal(b->selfCycles, 7);
+	assert_int_equal(mProfileNodeListSize(&test.profile.nodes), 5);
+
+	const struct mProfileFunction* function = _function(&test.profile, "a");
+	assert_int_equal(function->calls, 2);
+	assert_int_equal(function->inclusiveCycles, 21);
+	assert_int_equal(_edgeBetween(&test.profile, "main", "a")->calls, 2);
+	assert_int_equal(_edgeBetween(&test.profile, "main", "a")->inclusiveCycles, 21);
+	assert_int_equal(_edgeBetween(&test.profile, "a", "b")->calls, 1);
+	assert_int_equal(_edgeBetween(&test.profile, "[main]", "main")->calls, 1);
+	_teardownProgram(&test);
+}
+
+M_TEST_DEFINE(recorderRecursion) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+
+	// rec calls itself 300 levels deep, then returns all the way out
+	_call(&test, 1, 0x08000110, 0x08000280, SP_MAIN);
+	unsigned level;
+	for (level = 1; level <= 300; ++level) {
+		_call(&test, 2, 0x08000290, 0x08000280, SP_MAIN - level * 8);
+	}
+	for (level = 300; level >= 1; --level) {
+		_jump(&test, 3, 0x080002A0, 0x08000292, SP_MAIN - level * 8);
+	}
+	_jump(&test, 3, 0x080002A0, 0x08000112, SP_MAIN);
+
+	// m1 -> m2 -> m1 -> m2 -> m1, then back out
+	_call(&test, 1, 0x08000120, 0x080002C0, SP_MAIN);
+	_call(&test, 1, 0x080002D0, 0x08000300, SP_MAIN - 8);
+	_call(&test, 1, 0x08000310, 0x080002C0, SP_MAIN - 16);
+	_call(&test, 1, 0x080002D0, 0x08000300, SP_MAIN - 24);
+	_call(&test, 1, 0x08000310, 0x080002C0, SP_MAIN - 32);
+	_jump(&test, 1, 0x080002E0, 0x08000312, SP_MAIN - 32);
+	_jump(&test, 1, 0x08000320, 0x080002D2, SP_MAIN - 24);
+	_jump(&test, 1, 0x080002E0, 0x08000312, SP_MAIN - 16);
+	_jump(&test, 1, 0x08000320, 0x080002D2, SP_MAIN - 8);
+	_jump(&test, 1, 0x080002E0, 0x08000122, SP_MAIN);
+
+	// With everything returned, m2 called directly from main gets a node of its own
+	_call(&test, 4, 0x08000130, 0x08000300, SP_MAIN);
+	_jump(&test, 2, 0x08000320, 0x08000132, SP_MAIN);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	uint32_t main = _index(&test.profile, _child(&test.profile, mPROFILE_ROOT_MAIN, "main"));
+	const struct mProfileNode* rec = _child(&test.profile, main, "rec");
+	assert_int_equal(rec->calls, 1);
+	assert_int_equal(rec->recursiveCalls, 300);
+	assert_int_equal(rec->selfCycles, 300 * 2 + 300 * 3 + 3);
+	assert_int_equal(_function(&test.profile, "rec")->inclusiveCycles, rec->subtreeCycles);
+	assert_int_equal(_edgeBetween(&test.profile, "rec", "rec")->recursiveCalls, 300);
+
+	const struct mProfileNode* m1 = _child(&test.profile, main, "m1");
+	const struct mProfileNode* m2 = _child(&test.profile, _index(&test.profile, m1), "m2");
+	assert_int_equal(m1->calls, 1);
+	assert_int_equal(m1->recursiveCalls, 2);
+	assert_int_equal(m2->calls, 1);
+	assert_int_equal(m2->recursiveCalls, 1);
+	assert_int_equal(_edgeBetween(&test.profile, "m2", "m1")->recursiveCalls, 2);
+	assert_int_equal(_edgeBetween(&test.profile, "m1", "m2")->recursiveCalls, 1);
+
+	const struct mProfileNode* direct = _child(&test.profile, main, "m2");
+	assert_int_equal(direct->calls, 1);
+	assert_int_equal(direct->selfCycles, 2);
+	// Roots, main, rec, m1, m1/m2 and main/m2
+	assert_int_equal(mProfileNodeListSize(&test.profile.nodes), 7);
+	_teardownProgram(&test);
+}
+
+M_TEST_DEFINE(recorderTailCalls) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+	_call(&test, 1, 0x08000110, 0x08000340, SP_MAIN);
+	// tailsrc tail-calls taildst, which jumps back into tailsrc, which tail-calls taildst again
+	_jump(&test, 4, 0x08000350, 0x08000380, SP_MAIN);
+	_jump(&test, 5, 0x08000390, 0x08000358, SP_MAIN);
+	_jump(&test, 2, 0x0800035A, 0x08000380, SP_MAIN);
+	// taildst returns straight to main
+	_jump(&test, 6, 0x08000398, 0x08000112, SP_MAIN);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	uint32_t main = _index(&test.profile, _child(&test.profile, mPROFILE_ROOT_MAIN, "main"));
+	const struct mProfileNode* source = _child(&test.profile, main, "tailsrc");
+	const struct mProfileNode* target = _child(&test.profile, _index(&test.profile, source), "taildst");
+	assert_int_equal(source->calls, 1);
+	assert_int_equal(source->selfCycles, 6);
+	assert_int_equal(target->calls, 2);
+	assert_int_equal(target->selfCycles, 11);
+	assert_int_equal(_child(&test.profile, mPROFILE_ROOT_MAIN, "main")->selfCycles, 2);
+	_teardownProgram(&test);
+}
+
+M_TEST_DEFINE(recorderInterrupts) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+	_call(&test, 1, 0x08000110, 0x08000200, SP_MAIN);
+
+	// An interrupt while a is running: the BIOS calls the handler, which returns, then the
+	// BIOS returns to the interrupted code
+	_event(&test, mPROFILE_EVENT_BRANCH, 2, 3, 0x08000210, 0x18, SP_IRQ, 0x08000212 + 4, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 4, 0x00000140, 0x03000000, SP_IRQ, 0x00000144, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 5, 0x03000010, 0x03000020, SP_MAIN - 0x40, 0, STATUS_ARM_SYSTEM);
+
+	// A nested interrupt while the handler runs in System mode with interrupts enabled
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 2, 0x03000020, 0x18, SP_IRQ - 0x20, 0x03000024 + 4, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 4, 0x00000140, 0x03000000, SP_IRQ - 0x20, 0x00000144, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 6, 0x03000040, 0x00000144, SP_IRQ - 0x20, 0, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 3, 0x00000150, 0x03000024, SP_MAIN - 0x40, 0, STATUS_ARM_SYSTEM);
+
+	// The outer handler finishes, then the BIOS returns to a
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 7, 0x03000040, 0x00000144, SP_IRQ, 0, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 3, 0x00000150, 0x08000212, SP_MAIN - 0x18, 0, STATUS_THUMB_SYSTEM);
+	_jump(&test, 2, 0x08000220, 0x08000112, SP_MAIN);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	uint32_t main = _index(&test.profile, _child(&test.profile, mPROFILE_ROOT_MAIN, "main"));
+	const struct mProfileNode* a = _child(&test.profile, main, "a");
+	assert_int_equal(a->selfCycles, 3 + 2);
+	assert_int_equal(a->subtreeCycles, a->selfCycles);
+
+	const struct mProfileNode* irq = mProfileNodeListGetConstPointer(&test.profile.nodes, mPROFILE_ROOT_IRQ);
+	assert_int_equal(irq->calls, 2);
+	const struct mProfileNode* bios = _child(&test.profile, mPROFILE_ROOT_IRQ, "[BIOS]");
+	const struct mProfileNode* handler = _child(&test.profile, _index(&test.profile, bios), "handler");
+	assert_int_equal(bios->calls, 2);
+	assert_int_equal(bios->selfCycles, 4 + 3 + 4 + 3);
+	assert_int_equal(handler->calls, 2);
+	assert_int_equal(handler->selfCycles, 5 + 2 + 6 + 7);
+	assert_int_equal(irq->subtreeCycles, 4 + 3 + 4 + 3 + 5 + 2 + 6 + 7);
+	_teardownProgram(&test);
+}
+
+M_TEST_DEFINE(recorderUnwinding) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+	_call(&test, 1, 0x08000110, 0x08000200, SP_MAIN);
+	_call(&test, 1, 0x08000210, 0x08000240, SP_MAIN - 0x18);
+	// b longjmps back into main: the stack pointer goes back above both frames
+	_jump(&test, 2, 0x08000250, 0x08000150, SP_MAIN + 8);
+	// A new call from main must be a child of main, not of b
+	_call(&test, 3, 0x08000160, 0x08000200, SP_MAIN + 8);
+	_jump(&test, 4, 0x08000220, 0x08000162, SP_MAIN + 8);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	uint32_t main = _index(&test.profile, _child(&test.profile, mPROFILE_ROOT_MAIN, "main"));
+	const struct mProfileNode* a = _child(&test.profile, main, "a");
+	assert_int_equal(a->calls, 2);
+	assert_int_equal(_child(&test.profile, mPROFILE_ROOT_MAIN, "main")->selfCycles, 1 + 3 + 1);
+	_teardownProgram(&test);
+}
+
+M_TEST_DEFINE(recorderTrampolineAndFallThrough) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+	// main calls b through _call_via_r3, whose bx r3 leaves LR pointing back into main
+	_call(&test, 2, 0x08000140, 0x08000400, SP_MAIN);
+	_jump(&test, 1, 0x08000400, 0x08000240, SP_MAIN);
+	_jump(&test, 5, 0x08000250, 0x08000142, SP_MAIN);
+
+	// Code in a that runs on into b without a branch: b's cycles must be b's
+	_jump(&test, 1, 0x08000150, 0x0800023C, SP_MAIN);
+	_jump(&test, 4, 0x08000244, 0x08000154, SP_MAIN);
+
+	// A function-pointer call through GCC's local "bx r3" stub near the end of main: a BL into
+	// the middle of main, then the stub jumps to a, which returns straight to main
+	_call(&test, 1, 0x08000160, 0x080001F8, SP_MAIN);
+	_jump(&test, 1, 0x080001F8, 0x08000200, SP_MAIN);
+	_jump(&test, 6, 0x08000220, 0x08000162, SP_MAIN);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	const struct mProfileNode* mainNode = _child(&test.profile, mPROFILE_ROOT_MAIN, "main");
+	uint32_t main = _index(&test.profile, mainNode);
+	const struct mProfileNode* b = _child(&test.profile, main, "b");
+	assert_int_equal(b->calls, 1);
+	assert_int_equal(b->selfCycles, 5);
+	assert_int_equal(_edgeBetween(&test.profile, "main", "b")->calls, 1);
+	const struct mProfileNode* a = _child(&test.profile, main, "a");
+	assert_int_equal(a->calls, 1);
+	assert_int_equal(a->selfCycles, 6);
+	assert_int_equal(mainNode->recursiveCalls, 0);
+	// Stubs don't appear in the tree
+	ssize_t trampoline = mProfileFindFunctionByName(&test.profile, "_call_via_r3");
+	size_t i;
+	for (i = 0; i < mProfileNodeListSize(&test.profile.nodes); ++i) {
+		assert_int_not_equal(mProfileNodeListGetConstPointer(&test.profile.nodes, i)->function, trampoline);
+	}
+	const struct mProfileNode* fallThrough = _child(&test.profile, mPROFILE_ROOT_MAIN, "b");
+	assert_int_equal(fallThrough->selfCycles, 4);
+	_teardownProgram(&test);
+}
+
+M_TEST_DEFINE(recorderHiddenJumps) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+
+	// A BL used as a long jump within main: main carries on running, and nothing returns to it
+	_call(&test, 1, 0x08000110, 0x08000180, SP_MAIN);
+	_jump(&test, 2, 0x08000184, 0x08000150, SP_MAIN);
+	_call(&test, 1, 0x08000154, 0x08000240, SP_MAIN);
+	_jump(&test, 3, 0x08000250, 0x08000156, SP_MAIN);
+
+	// An interrupt taken straight after main's BL to a, so the BL itself is never seen as a jump.
+	// The BIOS returns to a, with main's LR restored.
+	_event(&test, mPROFILE_EVENT_BRANCH, 2, 2, 0x08000160, 0x18, SP_IRQ, 0x08000200 + 4, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 4, 0x00000140, 0x03000000, SP_IRQ, 0x00000144, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 5, 0x03000040, 0x00000144, SP_IRQ, 0, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 3, 0x00000150, 0x08000200, SP_MAIN, 0x08000163, STATUS_THUMB_SYSTEM);
+	// a returns to main
+	_jump(&test, 6, 0x08000220, 0x08000162, SP_MAIN);
+
+	// A stub with no symbol, just after the end of a function: the callee is where it jumps
+	_call(&test, 1, 0x08000170, 0x08000420, SP_MAIN);
+	_jump(&test, 1, 0x08000420, 0x08000240, SP_MAIN);
+	_jump(&test, 2, 0x08000250, 0x08000172, SP_MAIN);
+	// A real function with no symbol is an ordinary call to its region
+	_call(&test, 1, 0x08000174, 0x08000500, SP_MAIN);
+	_jump(&test, 3, 0x08000510, 0x08000504, SP_MAIN);
+	_jump(&test, 4, 0x08000520, 0x08000176, SP_MAIN);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	const struct mProfileNode* mainNode = _child(&test.profile, mPROFILE_ROOT_MAIN, "main");
+	uint32_t main = _index(&test.profile, mainNode);
+	assert_int_equal(mainNode->recursiveCalls, 0);
+	assert_int_equal(mainNode->selfCycles, 1 + 2 + 1 + 2 + 1 + 1 + 1 + 1);
+	const struct mProfileNode* b = _child(&test.profile, main, "b");
+	assert_int_equal(b->calls, 2);
+	assert_int_equal(b->selfCycles, 3 + 2);
+	const struct mProfileNode* unknown = _child(&test.profile, main, "[unknown 0x08000000]");
+	assert_int_equal(unknown->calls, 1);
+	assert_int_equal(unknown->selfCycles, 3 + 4);
+	const struct mProfileNode* a = _child(&test.profile, main, "a");
+	assert_int_equal(a->calls, 1);
+	assert_int_equal(a->selfCycles, 6);
+	assert_int_equal(
+	    _child(&test.profile, _index(&test.profile, _child(&test.profile, mPROFILE_ROOT_IRQ, "[BIOS]")), "handler")
+	        ->selfCycles,
+	    5);
+	// Everything has returned: only the root frame is left
+	assert_int_equal(mProfileRecorderFrameListSize(&test.recorder.frames), 1);
+	_teardownProgram(&test);
+}
+
+M_TEST_DEFINE(treeSaveLoadAndExport) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_runCalls(&test);
+	mProfileFinish(&test.profile);
+
+	struct VFile* vf = VFileMemChunk(NULL, 0);
+	assert_true(mProfileSave(&test.profile, vf));
+	struct mProfile loaded;
+	mProfileInit(&loaded);
+	assert_true(mProfileLoad(&loaded, vf));
+	vf->close(vf);
+
+	assert_int_equal(mProfileNodeListSize(&loaded.nodes), mProfileNodeListSize(&test.profile.nodes));
+	size_t i;
+	for (i = 0; i < mProfileNodeListSize(&loaded.nodes); ++i) {
+		const struct mProfileNode* a = mProfileNodeListGetConstPointer(&test.profile.nodes, i);
+		const struct mProfileNode* b = mProfileNodeListGetConstPointer(&loaded.nodes, i);
+		assert_int_equal(a->function, b->function);
+		assert_int_equal(a->parent, b->parent);
+		assert_int_equal(a->calls, b->calls);
+		assert_int_equal(a->selfCycles, b->selfCycles);
+		assert_int_equal(a->subtreeCycles, b->subtreeCycles);
+	}
+	assert_int_equal(_edgeBetween(&loaded, "main", "a")->calls, 2);
+
+	// A node that names a function that doesn't exist must be rejected
+	assert_false(_loadText(&loaded, "mprof 1\nnode -1 0 0 0 0 0\nnode -1 1 0 0 0 0\nnode 0 99 1 0 0 0\nend\n"));
+	mProfileDeinit(&loaded);
+
+	vf = VFileMemChunk(NULL, 0);
+	assert_true(mProfileExportCallgrind(&test.profile, vf));
+	size_t size = vf->size(vf);
+	char* text = calloc(1, size + 1);
+	vf->seek(vf, 0, SEEK_SET);
+	assert_int_equal(vf->read(vf, text, size), size);
+	vf->close(vf);
+	assert_non_null(strstr(text, "cfn=a\ncalls=2 0x08000200\n0x08000100 21 4\n"));
+	assert_non_null(strstr(text, "cfn=b\ncalls=1 0x08000240\n0x08000200 7 1\n"));
+	free(text);
+	_teardownProgram(&test);
+}
+
 M_TEST_SUITE_DEFINE(Profile, cmocka_unit_test(countersAndRegions), cmocka_unit_test(elfSymbols),
                     cmocka_unit_test(elfRejectsGarbage), cmocka_unit_test(attribution),
                     cmocka_unit_test(saveLoadRoundTrip), cmocka_unit_test(loadValidation),
-                    cmocka_unit_test(callgrindExport))
+                    cmocka_unit_test(callgrindExport), cmocka_unit_test(recorderCalls),
+                    cmocka_unit_test(recorderRecursion), cmocka_unit_test(recorderTailCalls),
+                    cmocka_unit_test(recorderInterrupts), cmocka_unit_test(recorderUnwinding),
+                    cmocka_unit_test(recorderTrampolineAndFallThrough), cmocka_unit_test(recorderHiddenJumps),
+                    cmocka_unit_test(treeSaveLoadAndExport))

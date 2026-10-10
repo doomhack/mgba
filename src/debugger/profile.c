@@ -6,10 +6,17 @@
 #include <mgba/internal/debugger/profile.h>
 
 DEFINE_VECTOR(mProfileFunctionList, struct mProfileFunction);
+DEFINE_VECTOR(mProfileNodeList, struct mProfileNode);
+DEFINE_VECTOR(mProfileEdgeList, struct mProfileEdge);
 
 struct mProfileRanking {
 	uint64_t cycles;
 	size_t index;
+};
+
+struct mProfileEdgeKey {
+	uint32_t from;
+	uint32_t to;
 };
 
 static void _freeFunctions(struct mProfile* profile, size_t from) {
@@ -38,15 +45,85 @@ static void _freeCounters(struct mProfile* profile) {
 	memset(&profile->other, 0, sizeof(profile->other));
 }
 
+static void _pseudoName(const struct mProfile* profile, unsigned pseudo, char* name, size_t size) {
+	if (pseudo < mPROFILE_PSEUDO_OTHER) {
+		unsigned region = pseudo - mPROFILE_PSEUDO_REGION;
+		if (profile->regionNames[region]) {
+			snprintf(name, size, "%s", profile->regionNames[region]);
+		} else {
+			snprintf(name, size, "[unknown 0x%02X000000]", region);
+		}
+	} else if (pseudo == mPROFILE_PSEUDO_OTHER) {
+		snprintf(name, size, "[unknown]");
+	} else if (pseudo == mPROFILE_PSEUDO_MAIN) {
+		snprintf(name, size, "[main]");
+	} else {
+		snprintf(name, size, "[IRQ]");
+	}
+}
+
+static void _resetTree(struct mProfile* profile) {
+	mProfileNodeListClear(&profile->nodes);
+	HashTableClear(&profile->children);
+	mProfileEdgeListClear(&profile->recursion);
+	HashTableClear(&profile->recursionIndex);
+	mProfileEdgeListClear(&profile->edges);
+
+	struct mProfileNode* root = mProfileNodeListAppend(&profile->nodes);
+	memset(root, 0, sizeof(*root));
+	root->function = mProfilePseudoFunction(profile, mPROFILE_PSEUDO_MAIN);
+	root->parent = mPROFILE_NONE;
+	root = mProfileNodeListAppend(&profile->nodes);
+	memset(root, 0, sizeof(*root));
+	root->function = mProfilePseudoFunction(profile, mPROFILE_PSEUDO_IRQ);
+	root->parent = mPROFILE_NONE;
+}
+
+static void _rebuildPseudoFunctions(struct mProfile* profile) {
+	_freeFunctions(profile, profile->symbolCount);
+	unsigned pseudo;
+	for (pseudo = 0; pseudo < mPROFILE_PSEUDO_MAX; ++pseudo) {
+		char name[64];
+		_pseudoName(profile, pseudo, name, sizeof(name));
+		struct mProfileFunction* function = mProfileFunctionListAppend(&profile->functions);
+		memset(function, 0, sizeof(*function));
+		function->name = strdup(name);
+		function->baseLength = strlen(name);
+		function->pseudo = true;
+		function->foldInto = -1;
+		if (pseudo < mPROFILE_PSEUDO_OTHER) {
+			function->start = (pseudo - mPROFILE_PSEUDO_REGION) << 24;
+			function->size = 1 << 24;
+		} else if (pseudo == mPROFILE_PSEUDO_OTHER) {
+			function->start = (uint32_t) mPROFILE_REGIONS << 24;
+			function->size = 0 - function->start;
+		}
+	}
+	// Node functions refer to positions in the function table, so the tree starts over
+	_resetTree(profile);
+	profile->finished = false;
+}
+
 void mProfileInit(struct mProfile* profile) {
 	memset(profile, 0, sizeof(*profile));
 	mProfileFunctionListInit(&profile->functions, 0);
+	mProfileNodeListInit(&profile->nodes, 0);
+	mProfileEdgeListInit(&profile->recursion, 0);
+	mProfileEdgeListInit(&profile->edges, 0);
+	HashTableInit(&profile->children, 0, NULL);
+	HashTableInit(&profile->recursionIndex, 0, NULL);
+	_rebuildPseudoFunctions(profile);
 }
 
 void mProfileDeinit(struct mProfile* profile) {
 	_freeCounters(profile);
 	_freeFunctions(profile, 0);
 	mProfileFunctionListDeinit(&profile->functions);
+	mProfileNodeListDeinit(&profile->nodes);
+	mProfileEdgeListDeinit(&profile->recursion);
+	mProfileEdgeListDeinit(&profile->edges);
+	HashTableDeinit(&profile->children);
+	HashTableDeinit(&profile->recursionIndex);
 	unsigned region;
 	for (region = 0; region < mPROFILE_REGIONS; ++region) {
 		free(profile->regionNames[region]);
@@ -59,12 +136,16 @@ void mProfileDeinit(struct mProfile* profile) {
 
 void mProfileClear(struct mProfile* profile) {
 	_freeCounters(profile);
-	_freeFunctions(profile, profile->symbolCount);
+	_resetTree(profile);
 	size_t i;
-	for (i = 0; i < profile->symbolCount; ++i) {
+	for (i = 0; i < mProfileFunctionListSize(&profile->functions); ++i) {
 		struct mProfileFunction* function = mProfileFunctionListGetPointer(&profile->functions, i);
 		function->selfCycles = 0;
 		function->executions = 0;
+		function->calls = 0;
+		function->recursiveCalls = 0;
+		function->inclusiveCycles = 0;
+		function->inclusiveExecutions = 0;
 	}
 	profile->elapsedCycles = 0;
 	profile->frames = 0;
@@ -73,10 +154,30 @@ void mProfileClear(struct mProfile* profile) {
 	profile->totalExecutions = 0;
 }
 
-void mProfileClearSymbols(struct mProfile* profile) {
+void mProfileBeginSymbols(struct mProfile* profile) {
 	_freeFunctions(profile, 0);
 	profile->symbolCount = 0;
-	profile->finished = false;
+}
+
+struct mProfileFunction* mProfileAppendSymbol(struct mProfile* profile, const char* name) {
+	struct mProfileFunction* function = mProfileFunctionListAppend(&profile->functions);
+	memset(function, 0, sizeof(*function));
+	function->name = strdup(name);
+	const char* dot = strchr(name, '.');
+	function->baseLength = dot && dot != name ? (size_t) (dot - name) : strlen(name);
+	function->trampoline = strncmp(name, "_call_via_", 10) == 0 || strncmp(name, "__call_via_", 11) == 0;
+	function->foldInto = -1;
+	++profile->symbolCount;
+	return function;
+}
+
+void mProfileEndSymbols(struct mProfile* profile) {
+	_rebuildPseudoFunctions(profile);
+}
+
+void mProfileClearSymbols(struct mProfile* profile) {
+	mProfileBeginSymbols(profile);
+	mProfileEndSymbols(profile);
 	free(profile->symbolSource);
 	profile->symbolSource = NULL;
 }
@@ -92,6 +193,19 @@ void mProfileSetRegionName(struct mProfile* profile, unsigned region, const char
 	}
 	free(profile->regionNames[region]);
 	profile->regionNames[region] = name ? strdup(name) : NULL;
+
+	unsigned pseudo = mPROFILE_PSEUDO_REGION + region;
+	size_t index = mProfilePseudoFunction(profile, pseudo);
+	if (index >= mProfileFunctionListSize(&profile->functions)) {
+		// Between mProfileBeginSymbols and mProfileEndSymbols, which names the pseudo-functions
+		return;
+	}
+	struct mProfileFunction* function = mProfileFunctionListGetPointer(&profile->functions, index);
+	char buffer[64];
+	_pseudoName(profile, pseudo, buffer, sizeof(buffer));
+	free(function->name);
+	function->name = strdup(buffer);
+	function->baseLength = strlen(buffer);
 }
 
 struct mProfileCounter* mProfileAllocCounter(struct mProfile* profile, uint32_t address) {
@@ -149,6 +263,19 @@ ssize_t mProfileFindFunction(const struct mProfile* profile, uint32_t address) {
 	return (ssize_t) low - 1;
 }
 
+uint32_t mProfileFunctionAt(const struct mProfile* profile, uint32_t address) {
+	ssize_t index = mProfileFindFunction(profile, address);
+	if (index >= 0) {
+		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, index);
+		return function->foldInto >= 0 ? (uint32_t) function->foldInto : (uint32_t) index;
+	}
+	uint32_t region = address >> 24;
+	if (region >= mPROFILE_REGIONS) {
+		return mProfilePseudoFunction(profile, mPROFILE_PSEUDO_OTHER);
+	}
+	return mProfilePseudoFunction(profile, mPROFILE_PSEUDO_REGION + region);
+}
+
 ssize_t mProfileFindFunctionByName(const struct mProfile* profile, const char* name) {
 	size_t i;
 	for (i = 0; i < mProfileFunctionListSize(&profile->functions); ++i) {
@@ -159,61 +286,68 @@ ssize_t mProfileFindFunctionByName(const struct mProfile* profile, const char* n
 	return -1;
 }
 
-static size_t _addPseudoFunction(struct mProfile* profile, const char* name, uint32_t start, uint32_t size) {
-	struct mProfileFunction* function = mProfileFunctionListAppend(&profile->functions);
-	memset(function, 0, sizeof(*function));
-	function->name = strdup(name);
-	function->baseLength = strlen(name);
-	function->start = start;
-	function->size = size;
-	function->pseudo = true;
-	function->foldInto = -1;
-	return mProfileFunctionListSize(&profile->functions) - 1;
+uint32_t mProfileGetChild(struct mProfile* profile, uint32_t parent, uint32_t function) {
+	struct mProfileEdgeKey key = { parent, function };
+	uintptr_t index = (uintptr_t) HashTableLookupBinary(&profile->children, &key, sizeof(key));
+	if (index) {
+		return index - 1;
+	}
+	struct mProfileNode* node = mProfileNodeListAppend(&profile->nodes);
+	memset(node, 0, sizeof(*node));
+	node->function = function;
+	node->parent = parent;
+	index = mProfileNodeListSize(&profile->nodes);
+	HashTableInsertBinary(&profile->children, &key, sizeof(key), (void*) index);
+	return index - 1;
 }
 
-static size_t _regionFunction(struct mProfile* profile, ssize_t* regionFunctions, unsigned region) {
-	if (regionFunctions[region] >= 0) {
-		return regionFunctions[region];
+static struct mProfileEdge* _edge(struct mProfileEdgeList* list, struct Table* index, uint32_t caller,
+                                  uint32_t callee) {
+	struct mProfileEdgeKey key = { caller, callee };
+	uintptr_t position = (uintptr_t) HashTableLookupBinary(index, &key, sizeof(key));
+	if (position) {
+		return mProfileEdgeListGetPointer(list, position - 1);
 	}
-	char name[64];
-	if (region == mPROFILE_REGIONS) {
-		snprintf(name, sizeof(name), "[unknown]");
-	} else if (profile->regionNames[region]) {
-		snprintf(name, sizeof(name), "%s", profile->regionNames[region]);
-	} else {
-		snprintf(name, sizeof(name), "[unknown 0x%02X000000]", region);
-	}
-	uint32_t start = region == mPROFILE_REGIONS ? (uint32_t) mPROFILE_REGIONS << 24 : region << 24;
-	uint32_t size = region == mPROFILE_REGIONS ? 0 - start : 1 << 24;
-	regionFunctions[region] = _addPseudoFunction(profile, name, start, size);
-	return regionFunctions[region];
+	struct mProfileEdge* edge = mProfileEdgeListAppend(list);
+	memset(edge, 0, sizeof(*edge));
+	edge->caller = caller;
+	edge->callee = callee;
+	HashTableInsertBinary(index, &key, sizeof(key), (void*) (uintptr_t) mProfileEdgeListSize(list));
+	return edge;
 }
 
-static void _attribute(struct mProfile* profile, size_t index, const struct mProfileCounter* counter) {
-	struct mProfileFunction* function = mProfileFunctionListGetPointer(&profile->functions, index);
-	if (function->foldInto >= 0) {
-		function = mProfileFunctionListGetPointer(&profile->functions, function->foldInto);
+void mProfileAddRecursion(struct mProfile* profile, uint32_t caller, uint32_t callee, uint64_t count) {
+	_edge(&profile->recursion, &profile->recursionIndex, caller, callee)->recursiveCalls += count;
+}
+
+static bool _hasAncestorFunction(const struct mProfile* profile, const struct mProfileNode* node) {
+	uint32_t parent = node->parent;
+	while (parent != mPROFILE_NONE) {
+		const struct mProfileNode* ancestor = mProfileNodeListGetConstPointer(&profile->nodes, parent);
+		if (ancestor->function == node->function) {
+			return true;
+		}
+		parent = ancestor->parent;
 	}
-	function->selfCycles += counter->cycles;
-	function->executions += counter->executions;
+	return false;
 }
 
 void mProfileFinish(struct mProfile* profile) {
-	_freeFunctions(profile, profile->symbolCount);
+	size_t functionCount = mProfileFunctionListSize(&profile->functions);
 	size_t i;
-	for (i = 0; i < profile->symbolCount; ++i) {
+	for (i = 0; i < functionCount; ++i) {
 		struct mProfileFunction* function = mProfileFunctionListGetPointer(&profile->functions, i);
 		function->selfCycles = 0;
 		function->executions = 0;
+		function->calls = 0;
+		function->recursiveCalls = 0;
+		function->inclusiveCycles = 0;
+		function->inclusiveExecutions = 0;
 	}
 	profile->totalCycles = 0;
 	profile->totalExecutions = 0;
 
-	ssize_t regionFunctions[mPROFILE_REGIONS + 1];
-	for (i = 0; i <= mPROFILE_REGIONS; ++i) {
-		regionFunctions[i] = -1;
-	}
-
+	// Self costs come from the per-instruction counters
 	unsigned region;
 	for (region = 0; region < mPROFILE_REGIONS; ++region) {
 		struct mProfileCounter** directory = profile->pages[region];
@@ -233,21 +367,73 @@ void mProfileFinish(struct mProfile* profile) {
 					continue;
 				}
 				uint32_t address = (region << 24) | (uint32_t) (page << mPROFILE_PAGE_BITS) | (uint32_t) (slot << 1);
-				ssize_t index = mProfileFindFunction(profile, address);
-				if (index < 0) {
-					index = _regionFunction(profile, regionFunctions, region);
-				}
-				_attribute(profile, index, counter);
+				struct mProfileFunction* function =
+				    mProfileFunctionListGetPointer(&profile->functions, mProfileFunctionAt(profile, address));
+				function->selfCycles += counter->cycles;
+				function->executions += counter->executions;
 				profile->totalCycles += counter->cycles;
 				profile->totalExecutions += counter->executions;
 			}
 		}
 	}
 	if (profile->other.executions) {
-		_attribute(profile, _regionFunction(profile, regionFunctions, mPROFILE_REGIONS), &profile->other);
+		struct mProfileFunction* function =
+		    mProfileFunctionListGetPointer(&profile->functions, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_OTHER));
+		function->selfCycles += profile->other.cycles;
+		function->executions += profile->other.executions;
 		profile->totalCycles += profile->other.cycles;
 		profile->totalExecutions += profile->other.executions;
 	}
+
+	// Subtree costs: children always come after their parents
+	size_t nodeCount = mProfileNodeListSize(&profile->nodes);
+	for (i = 0; i < nodeCount; ++i) {
+		struct mProfileNode* node = mProfileNodeListGetPointer(&profile->nodes, i);
+		node->subtreeCycles = node->selfCycles;
+		node->subtreeExecutions = node->selfExecutions;
+	}
+	for (i = nodeCount; i-- > 0;) {
+		struct mProfileNode* node = mProfileNodeListGetPointer(&profile->nodes, i);
+		if (node->parent != mPROFILE_NONE) {
+			struct mProfileNode* parent = mProfileNodeListGetPointer(&profile->nodes, node->parent);
+			parent->subtreeCycles += node->subtreeCycles;
+			parent->subtreeExecutions += node->subtreeExecutions;
+		}
+	}
+
+	// Per-function call counts and inclusive costs, and calls between functions
+	struct Table edgeIndex;
+	HashTableInit(&edgeIndex, 0, NULL);
+	mProfileEdgeListClear(&profile->edges);
+	for (i = 0; i < nodeCount; ++i) {
+		const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		if (node->function >= functionCount) {
+			continue;
+		}
+		struct mProfileFunction* function = mProfileFunctionListGetPointer(&profile->functions, node->function);
+		function->calls += node->calls;
+		function->recursiveCalls += node->recursiveCalls;
+		bool nested = _hasAncestorFunction(profile, node);
+		if (!nested) {
+			function->inclusiveCycles += node->subtreeCycles;
+			function->inclusiveExecutions += node->subtreeExecutions;
+		}
+		if (node->parent != mPROFILE_NONE) {
+			const struct mProfileNode* parent = mProfileNodeListGetConstPointer(&profile->nodes, node->parent);
+			struct mProfileEdge* edge = _edge(&profile->edges, &edgeIndex, parent->function, node->function);
+			edge->calls += node->calls;
+			if (!nested) {
+				edge->inclusiveCycles += node->subtreeCycles;
+				edge->inclusiveExecutions += node->subtreeExecutions;
+			}
+		}
+	}
+	for (i = 0; i < mProfileEdgeListSize(&profile->recursion); ++i) {
+		const struct mProfileEdge* recursion = mProfileEdgeListGetConstPointer(&profile->recursion, i);
+		_edge(&profile->edges, &edgeIndex, recursion->caller, recursion->callee)->recursiveCalls +=
+		    recursion->recursiveCalls;
+	}
+	HashTableDeinit(&edgeIndex);
 	profile->finished = true;
 }
 

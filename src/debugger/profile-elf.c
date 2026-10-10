@@ -223,7 +223,7 @@ bool mProfileLoadSymbols(struct mProfile* profile, struct VFile* vf) {
 	qsort(mProfileELFSymbolListGetPointer(&symbols, 0), mProfileELFSymbolListSize(&symbols),
 	      sizeof(struct mProfileELFSymbol), _compareSymbols);
 
-	mProfileClearSymbols(profile);
+	mProfileBeginSymbols(profile);
 	size_t count = mProfileELFSymbolListSize(&symbols);
 	size_t i = 0;
 	while (i < count) {
@@ -254,16 +254,10 @@ bool mProfileLoadSymbols(struct mProfile* profile, struct VFile* vf) {
 				}
 				previous->size = symbol->start - previous->start;
 			}
-			struct mProfileFunction* function = mProfileFunctionListAppend(&profile->functions);
-			memset(function, 0, sizeof(*function));
-			function->name = strdup(symbol->name);
-			const char* dot = strchr(symbol->name, '.');
-			function->baseLength = dot ? (size_t) (dot - symbol->name) : strlen(symbol->name);
+			struct mProfileFunction* function = mProfileAppendSymbol(profile, symbol->name);
 			function->start = symbol->start;
 			function->size = size;
 			function->thumb = symbol->thumb;
-			function->foldInto = -1;
-			++profile->symbolCount;
 		}
 		i = next;
 	}
@@ -286,9 +280,9 @@ bool mProfileLoadSymbols(struct mProfile* profile, struct VFile* vf) {
 		}
 	}
 	HashTableDeinit(&names);
+	mProfileEndSymbols(profile);
 
 	mProfileELFSymbolListDeinit(&symbols);
 	free(data);
-	profile->finished = false;
 	return true;
 }
