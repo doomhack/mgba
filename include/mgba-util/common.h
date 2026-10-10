@@ -49,7 +49,11 @@ CXX_GUARD_START
 #include <string.h>
 #include <time.h>
 
-#if defined(_MSC_VER) || defined(__cplusplus)
+#if defined(_MSC_VER) && defined(__cplusplus)
+// MSVC headers (such as Qt's) use __declspec(restrict), which a restrict macro would break,
+// and restrict is only a hint, so drop it from declarations seen by C++
+#define restrict
+#elif defined(_MSC_VER) || defined(__cplusplus)
 #define restrict __restrict
 #endif
 
