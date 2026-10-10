@@ -192,7 +192,7 @@ Each step's `delta` comes from `mTimingGlobalTime`, not `cpu->cycles`. It covers
 - A name that fails to demangle is shown mangled, never dropped.
 - Whatever text the demangler produces is shown as-is. No attempt is made to match GCC's `c++filt` formatting exactly, since that would only add something to break when either side changes.
 - Template-heavy names get very long, so the views offer a short form that drops template arguments and parameter lists (`bn::sprite_ptr::set_position`), with the full name in a tooltip and in exports.
-- Callgrind exports contain mangled names. Whether KCachegrind/QCachegrind demangle them for display hasn't been checked yet.
+- QCachegrind doesn't demangle names itself: it showed `_Z21I_PollWServEvents_e32v` from a GBADoom export as-is (checked 2026-10-10). So when a demangler hook is registered, the callgrind export writes demangled names, with the clone suffix in the profiler's format. Without one, as in the SDL CLI debugger, it writes mangled names. `.mprof` files always keep mangled names, since those are the identities.
 
 **Compiler clones.** GCC emits specialised or split copies of a function as separate symbols with a suffix: `.constprop.N` and `.isra.N` (specialised copies), `.part.N` (the remainder after partial inlining), `.cold` (rarely-taken code moved out of the function), and `.lto_priv.N` (LTO-local). These are real, separate code and are useful insight into what the compiler did, so by default each is its own function in the profile (decision D12).
 
