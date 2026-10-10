@@ -1,7 +1,9 @@
 # GBA Profiler: Design
 
-Status: draft, for discussion with upstream before implementation.
+Status: accepted, implementation not started.
 Branch: `profiler`, based on upstream `master` at `143adf5aa`.
+
+This is an independent fork. It is developed without coordination with upstream, but structured so that upstream could merge it unchanged if they ever chose to (see "Keeping the fork adoptable").
 
 ## Summary
 
@@ -79,7 +81,7 @@ Each callback computes `delta = mTimingGlobalTime(timing) - lastTime`. That cove
 
 Using the global clock rather than `cpu->cycles` means no sample is ever negative or dropped. It also means the sum of all charged cycles equals the elapsed emulated time, which is a useful invariant for tests.
 
-The PC is read directly rather than through `nextInstructionInfo`, which decodes the instruction and would be wasted work on every step. See open question Q1.
+The PC comes from `nextInstructionInfo`, which also decodes the instruction. That's wasted work on every step, but it needs no API change. If milestone 1 shows it matters, a "current PC" accessor on `mDebuggerPlatform` is added as a separate commit (decision D1).
 
 ### 3. Symbols
 
@@ -87,7 +89,7 @@ The PC is read directly rather than through `nextInstructionInfo`, which decodes
 - Read `.symtab` with the existing `mgba-util/elf.h` helpers, keeping `STT_FUNC` entries with their `st_size`. Clear bit 0 of `st_value` (it marks Thumb functions).
 - Keep the functions in an array sorted by address. Look up with a last-hit cache first, then binary search. Most consecutive samples fall in the same function, so the cache hit rate is high.
 - Fallbacks when there is no symbol: `[BIOS]` for 0x00000000–0x00003FFF, otherwise `[unknown <region>]` for each memory region (ROM, IWRAM, EWRAM), so cycles are never dropped.
-- `mCoreLoadELFSymbols` currently discards sizes and types (Q3). The profiler can parse the ELF itself without changing the shared symbol table, or the table can be extended. Either works.
+- `mCoreLoadELFSymbols` discards sizes and types, so the profiler parses the ELF itself (decision D3) and leaves the shared symbol table unchanged.
 
 ### 4. Call stacks and interrupt contexts
 
@@ -101,11 +103,11 @@ The profiler enables `STACK_TRACE_ENABLED` while recording. Then, for each sampl
 
 The tree is stored as nodes keyed by `(parent, function)`. The profiler keeps a pointer to the current node, and when the stack depth and top frame haven't changed (the common case) it reuses that node without re-walking the stack.
 
-Nested interrupts (handlers that re-enable IRQs, such as libtonc's nested IRQ dispatcher, which switches to System mode) are the riskiest part of relying on the upstream stack trace. Milestone 2 starts with a test ROM that covers them. If the stack trace gets them wrong, fixing it upstream helps the debugger too.
+Nested interrupts (handlers that re-enable IRQs, such as libtonc's nested IRQ dispatcher, which switches to System mode) are the riskiest part of relying on the upstream stack trace. Milestone 2 starts with a test ROM that covers them. If the stack trace gets them wrong, the fix goes into the stack trace itself, as a separate commit, since it benefits the debugger too (decision D5).
 
 ### 5. DMA, halt and BIOS
 
-Within one step's `delta` the profiler needs to know how much was DMA (and of which kind) and how much was halt. Neither is observable from outside the GBA core today, so this needs a small core addition (Q2):
+Within one step's `delta` the profiler needs to know how much was DMA (and of which kind) and how much was halt. Neither is observable from outside the GBA core today, so this needs a small core addition (decision D2):
 
 ```c
 struct GBAProfileCounters {      // in struct GBA, updated only when enabled
@@ -185,14 +187,14 @@ Example: `mgba-perf -N -F 600 --profile doom.callgrind GBADoom.elf`. This runs o
 
 **Scripting** (later): expose start/stop/save to Lua through the existing scripting bridge.
 
-## Proposed changes outside the new files
+## Changes outside the new files
 
-Kept deliberately small, and each can be discussed separately:
+Kept deliberately small, each in its own commit:
 
 1. `enum mDebuggerType`: add `DEBUGGER_PROFILER`. Update `supportsDebuggerType` for the GBA core.
-2. GBA core: `GBAProfileCounters` and the updates in `dma.c` / `gba.c` (§5), compiled under `ENABLE_DEBUGGERS`.
-3. Possibly a cheap way for a module to read the current PC (Q1).
-4. Possibly symbol sizes in `mDebuggerSymbols` (Q3).
+2. GBA core: `GBAProfileCounters` and the updates in `dma.c` / `gba.c` (§5), compiled under `ENABLE_DEBUGGERS` (D2).
+3. Only if measurements show it's needed: a "current PC" accessor on `mDebuggerPlatform` (D1).
+4. Only if the nested-IRQ tests find problems: fixes to the ARM stack trace (D5).
 
 ## Build changes
 
@@ -223,13 +225,26 @@ Targets: the recording path does no allocation after warm-up, does O(1) work in 
 4. **Qt UI.** Controller and live view, tree, per-instruction disassembly, save/open, compare.
 5. **Extras.** The CLI debugger `profile` command, Lua bindings, per-frame breakdowns, and a speedscope export.
 
-Each milestone is a self-contained PR-sized step.
+Each milestone is a self-contained step that leaves the branch building and working.
 
-## Open questions for upstream
+## Decisions
 
-- **Q1. Hook point.** Is a debugger module with `needsCallback` the right home, given that it forces one `step` per instruction? Or would you prefer a lighter dedicated per-instruction hook? Relatedly, is a cheap "current PC" accessor on `mDebuggerPlatform` acceptable, so the module doesn't have to call `nextInstructionInfo`?
-- **Q2. DMA and halt counters.** Are small, opt-in counters in `struct GBA` acceptable, or is there a preferred way to observe DMA and halt time from a debugger module?
-- **Q3. Symbols.** Should `mDebuggerSymbols` gain sizes and types, or should the profiler read the ELF on its own?
-- **Q4. Output.** Is callgrind fine as the export/import format?
-- **Q5. Stack trace.** Are there known limits of `ARMDebuggerUpdateStackTraceInternal` with nested interrupt handlers or hand-written assembly that we should plan around?
-- **Q6. UI placement.** A Tools → Profiler window, in the style of the memory access logger?
+Where there was a choice, the option that touches the least shared code wins, because that is what keeps the fork adoptable.
+
+- **D1. Hook point.** A debugger module using `needsCallback`, not a new per-instruction hook in the CPU. It forces one `step` per instruction while profiling, which costs wall-clock speed only. The PC comes from `nextInstructionInfo`; a cheaper accessor is added only if milestone 1's measurements call for it.
+- **D2. DMA and halt counters.** Small counters in `struct GBA`, updated behind one `enabled` check and compiled only with `ENABLE_DEBUGGERS`. There's no way to observe this from outside the core, and this is the smallest change that makes it possible.
+- **D3. Symbols.** The profiler reads the ELF symbol table itself through `mgba-util/elf.h`. `mDebuggerSymbols` stays unchanged.
+- **D4. Output format.** Callgrind for both export and import.
+- **D5. Stack trace.** Use the existing ARM stack trace. If the nested-IRQ test ROM shows problems, fix them in the stack trace itself, in commits separate from the profiler.
+- **D6. UI placement.** A Tools → Profiler window, in the same style as the memory access logger.
+
+## Keeping the fork adoptable
+
+The fork is developed without coordination with upstream. These rules keep it possible for upstream to merge it unchanged:
+
+- **Clean history on current upstream.** `profiler` is periodically rebased onto upstream `master` rather than merged, so it stays a clean series of commits on top. It is a personal branch, so force-pushing it is fine.
+- **Separable commits.** Each change to shared code (the items in "Changes outside the new files") is its own commit with its own rationale, so it can be taken or dropped independently. Profiler code lives in new files.
+- **Upstream conventions.** Coding style and naming from `CONTRIBUTING.md`, `.clang-format`, component-prefixed commit messages (`Debugger:`, `GBA:`, `Qt:`), and MPL 2.0 headers on new files. C in the core, and C++ only in the Qt frontend.
+- **Zero cost when unused.** No new build options, no new dependencies, nothing on the hot path when no profiler is attached, and everything under the existing `ENABLE_DEBUGGERS`.
+- **Every frontend builds.** Changes must not break the SDL, libretro, headless or console builds even where the profiler isn't exposed. Check at least the Qt, SDL and `mgba-perf` targets, and a build with `ENABLE_DEBUGGERS=OFF`.
+- **Fork-only material stays apart.** This document and anything only the fork needs live in separate commits that would be easy to leave out of a merge.
