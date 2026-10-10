@@ -37,5 +37,5 @@ typedef struct callTreeNode {
 const std::map<void*, uint64_t>& GetInstructionMap();
 const std::map<functionEntry*, functionStats*>& GetFunctionCounts();
 const callTreeNode* GetCallTree();
-const std::map<void*, uint64_t>& GetInstructionsForFunction(const char* functionName);
+const std::map<void*, std::pair<uint64_t, std::string>>& GetInstructionsForFunction(const char* functionName);
 #endif

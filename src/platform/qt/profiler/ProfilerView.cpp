@@ -35,6 +35,8 @@ void ProfilerView::setupViews() {
 
 	connect(this->m_ui.treeWidget, &QTreeWidget::itemClicked, this, &ProfilerView::onFunctionSelected);
 	connect(this->m_ui.listWidget, &QTreeWidget::itemClicked, this, &ProfilerView::onFunctionSelected);
+
+	m_ui.listWidget->setSortingEnabled(true);
 }
 
 QTreeWidgetItem* ProfilerView::buildCallTreeViewRecursive(const callTreeNode* node, QTreeWidgetItem* parent)
@@ -61,14 +63,15 @@ void ProfilerView::onFunctionSelected(QTreeWidgetItem* item, int column)
 
 	QString functionName = item->text(0);
 
-	std::map<void*, uint64_t> instructionCounts = GetInstructionsForFunction(functionName.toLatin1().constData());
+	std::map<void*, std::pair<uint64_t, std::string>> instructionCounts = GetInstructionsForFunction(functionName.toLatin1().constData());
 
-	for (const auto& pair : instructionCounts) {
-		double inclusiveTimeMs = pair.second / (double) cpuToMs;
+	for (const auto& pair : instructionCounts)
+	{
+		double inclusiveTimeMs = pair.second.first / (double) cpuToMs;
 
 		QString hexStr = QString::asprintf("0x%08X", pair.first);
 
 		QTreeWidgetItem* item = new QTreeWidgetItem(
-		    this->m_ui.instructionCounts, QStringList() << hexStr << QString::number(inclusiveTimeMs, 'f', 3));
+		    this->m_ui.instructionCounts, QStringList() << hexStr << QString::number(inclusiveTimeMs, 'f', 3) << QString(pair.second.second.c_str()));
 	}
 }

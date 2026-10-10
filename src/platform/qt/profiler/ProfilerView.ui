@@ -124,7 +124,7 @@
       <item>
        <widget class="QTreeWidget" name="instructionCounts">
         <property name="columnCount">
-         <number>2</number>
+         <number>3</number>
         </property>
         <column>
          <property name="text">
@@ -134,6 +134,11 @@
         <column>
          <property name="text">
           <string notr="true">Ms</string>
+         </property>
+        </column>
+		<column>
+         <property name="text">
+          <string notr="true">Instr</string>
          </property>
         </column>
        </widget>

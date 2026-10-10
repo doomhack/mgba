@@ -630,6 +630,7 @@ void Window::consoleOpen() {
 void Window::beginProfile() {
 	m_controller.get()->reset();
 	m_controller.get()->attachProfiler();
+	m_controller.get()->reset();
 }
 
 void Window::endProfile() {

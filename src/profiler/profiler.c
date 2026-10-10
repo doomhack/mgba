@@ -71,6 +71,10 @@ void _ProfilerEnterInstruction(struct mProfilerModule* module, void* instr, uint
 }
 
 void _ProfilerExitInstruction(struct mProfilerModule* module, void* linkReg, uint32_t cycles) {
+
+	if (cycles < prevCycles)
+		return;
+
 	if (armMode)
 		CollectorArmInstruction(instruction, linkReg, cycles - prevCycles);
 	else

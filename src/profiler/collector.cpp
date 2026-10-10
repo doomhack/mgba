@@ -2,25 +2,33 @@
 
 #include <elf/elf++.hh>
 
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <array>
+
 
 std::map<void*, uint64_t> instructionMap;
 std::vector<functionEntry*> functionList;
 std::vector<stackFrame*> callStack;
 std::map<functionEntry*, functionStats*> functionCounts;
-std::map<void*, uint64_t> functionInstructions;
-
+std::map<void*, std::pair<uint64_t, std::string>> functionInstructions;
+std::map<void*, std::string> instructionDisassembly;
 
 callTreeNode* callTree = nullptr;
 callTreeNode* currentNode = nullptr;
 
 uint64_t totalCycles = 0;
 
+bool hitMain = false;
+
 const std::map<void*, uint64_t>& GetInstructionMap()
 {
 	return instructionMap;
 }
 
-const std::map<void*, uint64_t>& GetInstructionsForFunction(const char* functionName)
+const std::map<void*, std::pair<uint64_t, std::string>>& GetInstructionsForFunction(const char* functionName)
 {
 	functionInstructions.clear();
 
@@ -38,7 +46,7 @@ const std::map<void*, uint64_t>& GetInstructionsForFunction(const char* function
 			{
 				if (instructionMap.count((void*)(i + start)) > 0)
 				{
-					functionInstructions[(void*) (i + start)] = instructionMap[(void*) (i + start)];
+					functionInstructions[(void*) (i + start)] = std::pair<uint64_t, std::string>(instructionMap[(void*) (i + start)], instructionDisassembly[(void*) (i + start)]);
 				}
 			}
 		}
@@ -110,26 +118,39 @@ static bool checkCall(void* instr, void* linkReg, uint32_t cycles)
 {	
 	functionEntry* thisFunction = findFunction(instr);
 
-	stackFrame* frame = callStack.back();
+	if (!hitMain)
+	{
+		if (thisFunction && thisFunction->name == "main")
+			hitMain = true;
+		else
+			return false;
+	}
 
-	currentNode->cycleCount += cycles;
-
-	if (!functionCounts.count(thisFunction))
+		if (!functionCounts.count(thisFunction))
 		functionCounts[thisFunction] = new functionStats();
 
 	functionCounts[thisFunction]->cycles += cycles;
 
+	if (thisFunction->base_addr == 0x4000)
+		return true;
+		
 
-	callTreeNode* n = currentNode;
-
-	while (n)
-	{
-		n->inclusiveCycleCount += cycles;
-		n = n->parentNode;
-	}
+	stackFrame* frame = callStack.back();
 
 	if (frame && frame->function == thisFunction)
+	{
+		callTreeNode* n = currentNode;
+
+		while (n)
+		{
+			n->inclusiveCycleCount += cycles;
+			n = n->parentNode;
+		}
+
+		currentNode->cycleCount += cycles;
 		return true;
+	}
+		
 
 	if (frame) {
 		stackFrame* p = frame;
@@ -145,9 +166,26 @@ static bool checkCall(void* instr, void* linkReg, uint32_t cycles)
 					currentNode = currentNode->parentNode;
 				}
 
+				callTreeNode* n = currentNode;
+
+				while (n)
+				{
+					n->inclusiveCycleCount += cycles;
+					n = n->parentNode;
+				}
+				currentNode->cycleCount += cycles;
+
+
 				return true;
 			}
 		}
+	}
+
+	callTreeNode* n = currentNode;
+
+	while (n) {
+		n->inclusiveCycleCount += cycles;
+		n = n->parentNode;
 	}
 
 	//Call
@@ -168,6 +206,8 @@ static bool checkCall(void* instr, void* linkReg, uint32_t cycles)
 	}
 	currentNode = currentNode->childNodes[thisFunction];
 	currentNode->callCount++;
+	currentNode->cycleCount += cycles;
+	currentNode->inclusiveCycleCount += cycles;
 
 	functionCounts[thisFunction]->callCount++;
 
@@ -197,6 +237,67 @@ extern "C" void CollectorThumbInstruction(uint16_t* instr, uint32_t* linkReg, ui
 }
 
 extern "C" void CollectorInitSymbols(const char* filePath)
+{
+	std::array<char, 4096> buffer {};
+	std::string result;
+
+	std::string command = std::string("C:\\devkitPro\\devkitARM\\bin\\arm-none-eabi-objdump.exe -D -C ") + filePath;
+	FILE* pipe = _popen(command.c_str(), "r");
+	if (!pipe)
+		throw std::runtime_error("popen() failed!");
+
+	functionEntry* currentFunction = nullptr;
+
+	while (fgets(buffer.data(), buffer.size(), pipe) != nullptr)
+	{
+		std::string bs = std::string(buffer.data());
+		if (buffer[0] == '0')
+		{
+			char* endptr = &buffer.data()[8];
+
+			unsigned int addr = strtoul(buffer.data(), &endptr, 16);
+
+			if (currentFunction)
+			{
+				currentFunction->length = (addr - currentFunction->base_addr);
+			}
+
+			functionEntry* fe = new functionEntry;
+			fe->base_addr = addr;
+
+			std::string name = std::string(&buffer.data()[10]);
+			name = name.substr(0, name.find_last_of('>'));
+
+			fe->name = name;
+
+			functionList.push_back(fe);
+
+			currentFunction = fe;
+		}
+		else if (buffer[0] == ' ' && buffer[8] == ':')
+		{
+			char* endptr = &buffer.data()[8];
+
+			unsigned int addr = strtoul(&buffer.data()[1], &endptr, 16);
+
+			instructionDisassembly[(void*) addr] = std::string(&buffer.data()[0]);
+			instructionDisassembly[(void*) addr].pop_back();
+		}
+	}
+
+	_pclose(pipe);
+
+	functionEntry* fe = new functionEntry;
+	fe->base_addr = 0x4000;
+	fe->length = 32;
+	fe->name = "IRQ";
+	functionList.push_back(fe);
+
+	currentNode = callTree = new callTreeNode();
+	callStack.push_back(nullptr);
+}
+
+extern "C" void CollectorInitSymbols2(const char* filePath)
 {
 	FILE* fd = fopen(filePath, "rb");
 

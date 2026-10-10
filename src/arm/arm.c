@@ -10,6 +10,7 @@
 #include <mgba/internal/arm/isa-thumb.h>
 
 #ifdef ENABLE_PROFILER
+	#include <mgba/internal/gba/gba.h>
 	#include <mgba/profiler/profiler.h>
 #endif
 
@@ -203,31 +204,52 @@ static const uint16_t conditionLut[16] = {
 	0x0000 // NV
 };
 
-static inline void _ProfilerEnter(struct ARMCore* cpu, bool armMode) {
+static inline void _ProfilerEnter(struct ARMCore* cpu, bool armMode, bool irq) {
 #ifdef ENABLE_PROFILER
 
 	if (cpu->components[CPU_COMPONENT_PROFILER])
 	{
+		struct GBA* gba = (struct GBA*) cpu->master;
+		
+		int32_t cycles = cpu->cycles;
+		void* ip = cpu->gprs[ARM_PC];
+
+		if (irq)
+		{
+			cycles = gba->timing.globalCycles;
+			ip = 0x4004;
+		}
+		
 		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])
-		    ->enterInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->gprs[ARM_PC], cpu->cycles, armMode);
+		    ->enterInstruction(cpu->components[CPU_COMPONENT_PROFILER], ip, cycles, armMode);
 	}
 #endif
 }
 
-static inline void _ProfilerExit(struct ARMCore* cpu) {
+static inline void _ProfilerExit(struct ARMCore* cpu, bool irq) {
 #ifdef ENABLE_PROFILER
 
 	if (cpu->components[CPU_COMPONENT_PROFILER])
 	{
+		struct GBA* gba = (struct GBA*) cpu->master;
+
+		int32_t cycles = cpu->cycles;
+		void* lr = cpu->gprs[ARM_LR] + (cpu->gprs[ARM_LR] & 1);
+
+		if (irq)
+		{
+			cycles = gba->timing.globalCycles;
+			lr = 0x4004;
+		}
+
 		mProfilerModule(cpu->components[CPU_COMPONENT_PROFILER])
-		    ->exitInstruction(cpu->components[CPU_COMPONENT_PROFILER], cpu->gprs[ARM_LR] + (cpu->gprs[ARM_LR] & 1),
-		                      cpu->cycles);
+		    ->exitInstruction(cpu->components[CPU_COMPONENT_PROFILER], lr, cycles);
 	}
 #endif
 }
 
 static inline void ARMStep(struct ARMCore* cpu) {
-	_ProfilerEnter(cpu, true);
+	_ProfilerEnter(cpu, true, false);
 
 	uint32_t opcode = cpu->prefetch[0];
 	cpu->prefetch[0] = cpu->prefetch[1];
@@ -241,7 +263,7 @@ static inline void ARMStep(struct ARMCore* cpu) {
 		if (!conditionMet) {
 			cpu->cycles += ARM_PREFETCH_CYCLES;
 
-			_ProfilerExit(cpu);
+			_ProfilerExit(cpu, false);
 
 			return;
 		}
@@ -249,11 +271,11 @@ static inline void ARMStep(struct ARMCore* cpu) {
 	ARMInstruction instruction = _armTable[((opcode >> 16) & 0xFF0) | ((opcode >> 4) & 0x00F)];
 	instruction(cpu, opcode);
 
-	_ProfilerExit(cpu);
+	_ProfilerExit(cpu, false);
 }
 
 static inline void ThumbStep(struct ARMCore* cpu) {
-	_ProfilerEnter(cpu, false);
+	_ProfilerEnter(cpu, false, false);
 
 	uint32_t opcode = cpu->prefetch[0];
 	cpu->prefetch[0] = cpu->prefetch[1];
@@ -262,7 +284,7 @@ static inline void ThumbStep(struct ARMCore* cpu) {
 	ThumbInstruction instruction = _thumbTable[opcode >> 6];
 	instruction(cpu, opcode);
 
-	_ProfilerExit(cpu);
+	_ProfilerExit(cpu, false);
 }
 
 void ARMRun(struct ARMCore* cpu) {
@@ -289,6 +311,7 @@ void ARMRunLoop(struct ARMCore* cpu) {
 			ARMStep(cpu);
 		}
 	}
+
 	cpu->irqh.processEvents(cpu);
 }
 
