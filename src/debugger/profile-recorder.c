@@ -187,7 +187,10 @@ static void _popTo(struct mProfileRecorder* recorder, size_t size) {
 	}
 }
 
-static void _pushCall(struct mProfileRecorder* recorder, uint32_t function, const struct mProfileEvent* event) {
+// Push a call frame. An exception (an SWI, or an interrupt too deeply nested to track as one)
+// always enters the function it goes to, so it's never a stub.
+static void _pushCall(struct mProfileRecorder* recorder, uint32_t function, const struct mProfileEvent* event,
+                      bool exception) {
 	if (mProfileRecorderFrameListSize(&recorder->frames) >= MAX_FRAMES) {
 		_transition(recorder, _top(recorder), function);
 		return;
@@ -198,8 +201,16 @@ static void _pushCall(struct mProfileRecorder* recorder, uint32_t function, cons
 	// have no symbol. The callee is wherever the stub jumps, not the stub. A BL to the start of
 	// the calling function is ordinary recursion.
 	bool stub;
+	bool transparent = false;
 	uint32_t fallback = mPROFILE_NONE;
-	if (function < recorder->profile->symbolCount) {
+	if (function >= recorder->profile->symbolCount && function == _nodeFunction(recorder, parent)) {
+		// Code with no symbols calling itself, such as the BIOS calling its own routines: there's no
+		// function boundary to show, but the frame still has to be tracked to recognize its return
+		stub = false;
+		transparent = true;
+	} else if (exception) {
+		stub = false;
+	} else if (function < recorder->profile->symbolCount) {
 		const struct mProfileFunction* target =
 		    mProfileFunctionListGetConstPointer(&recorder->profile->functions, function);
 		stub = target->trampoline || (function == _nodeFunction(recorder, parent) && event->to != target->start);
@@ -215,7 +226,11 @@ static void _pushCall(struct mProfileRecorder* recorder, uint32_t function, cons
 	frame->sp = event->sp;
 	frame->bank = _bank(event->status);
 	frame->leafOwned = mPROFILE_NONE;
-	if (stub) {
+	if (transparent) {
+		frame->baseNode = parent;
+		frame->baseOwned = mPROFILE_NONE;
+		frame->stubCaller = mPROFILE_NONE;
+	} else if (stub) {
 		frame->baseNode = parent;
 		frame->baseOwned = mPROFILE_NONE;
 		frame->stubCaller = parent;
@@ -232,7 +247,7 @@ static void _pushInterrupt(struct mProfileRecorder* recorder, const struct mProf
 	if (recorder->depth + 1 >= mPROFILE_MAX_CONTEXTS ||
 	    mProfileRecorderFrameListSize(&recorder->frames) >= MAX_FRAMES) {
 		// Too deep to track separately: treat the handler as called from the interrupted code
-		_pushCall(recorder, _functionAt(recorder, event->to), event);
+		_pushCall(recorder, _functionAt(recorder, event->to), event, true);
 		return;
 	}
 	++recorder->depth;
@@ -316,7 +331,7 @@ static void _branch(struct mProfileRecorder* recorder, const struct mProfileEven
 			_pushInterrupt(recorder, event);
 		} else {
 			// Other exceptions, such as SWIs into a real BIOS, return like calls
-			_pushCall(recorder, target, event);
+			_pushCall(recorder, target, event, true);
 		}
 		return;
 	}
@@ -350,7 +365,7 @@ static void _branch(struct mProfileRecorder* recorder, const struct mProfileEven
 	}
 
 	if ((event->lr & ~1U) == event->from + event->width) {
-		_pushCall(recorder, target, event);
+		_pushCall(recorder, target, event, false);
 		return;
 	}
 

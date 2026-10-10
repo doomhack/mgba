@@ -5,8 +5,16 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "util/test/suite.h"
 
+#include <mgba/core/config.h>
+#include <mgba/core/core.h>
+#include <mgba/core/log.h>
 #include <mgba/internal/debugger/profile.h>
+#include <mgba/internal/debugger/profiler.h>
 #include <mgba-util/vfs.h>
+
+#ifdef M_CORE_GBA
+#include "debugger/test/profile-rom/profile-rom.h"
+#endif
 
 #define STT_NOTYPE 0
 #define STT_OBJECT 1
@@ -388,9 +396,11 @@ M_TEST_DEFINE(callgrindExport) {
 #define STATUS_THUMB_SYSTEM 0x3F
 #define STATUS_ARM_SYSTEM 0x1F
 #define STATUS_ARM_IRQ 0x92
+#define STATUS_ARM_SUPERVISOR 0x93
 
 #define SP_MAIN 0x03007F00
 #define SP_IRQ 0x03007FA0
+#define SP_SUPERVISOR 0x03007FE0
 
 struct RecorderTest {
 	struct mProfile profile;
@@ -799,6 +809,193 @@ M_TEST_DEFINE(recorderHiddenJumps) {
 	_teardownProgram(&test);
 }
 
+M_TEST_DEFINE(recorderBiosInternalCalls) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+
+	// main makes an SWI. The BIOS calls one of its own routines in System mode, an interrupt is
+	// taken inside that routine, then both return.
+	_event(&test, mPROFILE_EVENT_BRANCH, 2, 1, 0x08000110, 0x08, SP_SUPERVISOR, 0x08000112, STATUS_ARM_SUPERVISOR);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 4, 0x00000008, 0x00000140, SP_SUPERVISOR, 0x08000112,
+	       STATUS_ARM_SUPERVISOR);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 2, 0x000000A0, 0x000001C4, SP_MAIN - 0x10, 0x000000A4, STATUS_ARM_SYSTEM);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 3, 0x000001F0, 0x18, SP_IRQ, 0x000001F4 + 4, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 4, 0x00000140, 0x03000000, SP_IRQ, 0x00000144, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 5, 0x03000040, 0x00000144, SP_IRQ, 0, STATUS_ARM_IRQ);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 3, 0x00000150, 0x000001F4, SP_MAIN - 0x10, 0, STATUS_ARM_SYSTEM);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 2, 0x000001D0, 0x000000A4, SP_MAIN - 0x10, 0, STATUS_ARM_SYSTEM);
+	_event(&test, mPROFILE_EVENT_BRANCH, 4, 3, 0x00000150, 0x08000112, SP_MAIN, 0, STATUS_THUMB_SYSTEM);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	// The BIOS calling itself is neither a call nor recursion
+	uint32_t main = _index(&test.profile, _child(&test.profile, mPROFILE_ROOT_MAIN, "main"));
+	const struct mProfileNode* bios = _child(&test.profile, main, "[BIOS]");
+	assert_int_equal(bios->calls, 1);
+	assert_int_equal(bios->recursiveCalls, 0);
+	assert_int_equal(bios->selfCycles, 4 + 2 + 3 + 2 + 3);
+	assert_int_equal(mProfileEdgeListSize(&test.profile.recursion), 0);
+	const struct mProfileNode* irqBios = _child(&test.profile, mPROFILE_ROOT_IRQ, "[BIOS]");
+	assert_int_equal(_child(&test.profile, _index(&test.profile, irqBios), "handler")->selfCycles, 5);
+	assert_int_equal(mProfileRecorderFrameListSize(&test.recorder.frames), 1);
+	_teardownProgram(&test);
+}
+
+#ifdef M_CORE_GBA
+// The test ROM (profile-rom/main.c) run in a GBA core with the profiler attached
+
+#define ROM_DONE 0x0203FFF0
+#define ROM_TIMER_TICKS 0x0203FFF4
+#define ROM_HBLANK_TICKS 0x0203FFF8
+#define ROM_NESTED_HBLANKS 0x0203FFFC
+
+static void _silentLog(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
+	UNUSED(logger);
+	UNUSED(category);
+	UNUSED(level);
+	UNUSED(format);
+	UNUSED(args);
+}
+
+static struct mLogger _silentLogger = { .log = _silentLog };
+
+// The node for a function under a root, wherever it is in that tree
+static const struct mProfileNode* _findInTree(const struct mProfile* profile, uint32_t root, const char* name) {
+	uint32_t function = _functionId(profile, name);
+	size_t i;
+	for (i = 0; i < mProfileNodeListSize(&profile->nodes); ++i) {
+		const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		if (node->function != function) {
+			continue;
+		}
+		uint32_t ancestor = i;
+		while (mProfileNodeListGetConstPointer(&profile->nodes, ancestor)->parent != mPROFILE_NONE) {
+			ancestor = mProfileNodeListGetConstPointer(&profile->nodes, ancestor)->parent;
+		}
+		if (ancestor == root) {
+			return node;
+		}
+	}
+	return NULL;
+}
+
+M_TEST_DEFINE(profileTestROM) {
+	mLogSetDefaultLogger(&_silentLogger);
+	struct VFile* rom = VFileFromConstMemory(profile_rom_gba, profile_rom_gba_len);
+	struct mCore* core = mCoreFindVF(rom);
+	assert_non_null(core);
+	assert_true(core->init(core));
+	static mColor videoBuffer[256 * 256];
+	core->setVideoBuffer(core, videoBuffer, 256);
+	mCoreConfigInit(&core->config, NULL);
+	mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "ignore");
+	mCoreLoadConfig(core);
+	assert_true(core->loadROM(core, rom));
+	core->reset(core);
+
+	struct mDebugger debugger;
+	mDebuggerInit(&debugger);
+	mDebuggerAttach(&debugger, core);
+	struct mDebuggerProfiler* profiler = calloc(1, sizeof(*profiler));
+	mDebuggerProfilerInit(profiler);
+	mDebuggerAttachModule(&debugger, &profiler->d);
+	struct VFile* elf = VFileFromConstMemory(profile_rom_elf, profile_rom_elf_len);
+	assert_true(mDebuggerProfilerLoadSymbols(profiler, elf, "profile-rom.elf"));
+	elf->close(elf);
+	assert_true(mDebuggerProfilerStart(profiler));
+
+	int frames;
+	for (frames = 0; frames < 600 && !core->busRead32(core, ROM_DONE); ++frames) {
+		mDebuggerRunFrame(&debugger);
+	}
+	mDebuggerRunFrame(&debugger);
+	mDebuggerProfilerStop(profiler);
+	uint32_t timerTicks = core->busRead32(core, ROM_TIMER_TICKS);
+	uint32_t hblankTicks = core->busRead32(core, ROM_HBLANK_TICKS);
+	uint32_t nestedHBlanks = core->busRead32(core, ROM_NESTED_HBLANKS);
+	assert_true(core->busRead32(core, ROM_DONE));
+	assert_int_equal(timerTicks, 8);
+	assert_true(hblankTicks > 0);
+	// HBlank interrupts must have nested inside the timer handler, or that path isn't tested
+	assert_true(nestedHBlanks > 0);
+
+	struct mProfile* profile = &profiler->profile;
+	assert_int_equal(profile->totalCycles, profile->elapsedCycles);
+	uint64_t treeCycles = 0;
+	size_t i;
+	for (i = 0; i < mProfileNodeListSize(&profile->nodes); ++i) {
+		treeCycles += mProfileNodeListGetConstPointer(&profile->nodes, i)->selfCycles;
+	}
+	assert_int_equal(treeCycles, profile->totalCycles);
+
+	const struct mProfileNode* mainNode = _findInTree(profile, mPROFILE_ROOT_MAIN, "main");
+	assert_non_null(mainNode);
+	uint32_t main = _index(profile, mainNode);
+	assert_int_equal(mainNode->calls, 1);
+
+	const struct mProfileNode* callsLeaf = _child(profile, main, "callsLeaf");
+	assert_int_equal(callsLeaf->calls, 1);
+	assert_int_equal(_child(profile, _index(profile, callsLeaf), "leaf")->calls, 10);
+
+	const struct mProfileNode* recurse = _child(profile, main, "recurse");
+	assert_int_equal(recurse->calls, 3);
+	assert_int_equal(recurse->recursiveCalls, 150);
+
+	const struct mProfileNode* mutualA = _child(profile, main, "mutualA");
+	const struct mProfileNode* mutualB = _child(profile, _index(profile, mutualA), "mutualB");
+	assert_int_equal(mutualA->calls, 2);
+	assert_int_equal(mutualA->recursiveCalls, 20);
+	assert_int_equal(mutualB->calls, 2);
+	assert_int_equal(mutualB->recursiveCalls, 18);
+
+	// Function-pointer and IWRAM calls go through "bx" stubs with no symbol
+	const struct mProfileNode* callsPointer = _child(profile, main, "callsPointer");
+	assert_int_equal(_child(profile, _index(profile, callsPointer), "pointerTarget")->calls, 5);
+	const struct mProfileNode* callsIwram = _child(profile, main, "callsIwram");
+	assert_int_equal(_child(profile, _index(profile, callsIwram), "iwramWork")->calls, 6);
+
+	const struct mProfileNode* callsTail = _child(profile, main, "callsTail");
+	const struct mProfileNode* tailSource = _child(profile, _index(profile, callsTail), "tailSource");
+	assert_int_equal(tailSource->calls, 4);
+	assert_int_equal(_child(profile, _index(profile, tailSource), "tailTarget")->calls, 4);
+
+	// Interrupt handlers only appear under [IRQ], once per interrupt they handled
+	mProfileFinish(profile);
+	assert_int_equal(_function(profile, "timerWork")->calls, timerTicks);
+	assert_int_equal(_function(profile, "hblankWork")->calls, hblankTicks);
+	assert_null(_findInTree(profile, mPROFILE_ROOT_MAIN, "timerWork"));
+	assert_null(_findInTree(profile, mPROFILE_ROOT_MAIN, "hblankWork"));
+	assert_non_null(_findInTree(profile, mPROFILE_ROOT_IRQ, "timerWork"));
+	assert_true(mProfileNodeListGetConstPointer(&profile->nodes, mPROFILE_ROOT_IRQ)->calls >= timerTicks + hblankTicks);
+
+	// Only the recursive functions have recursive calls
+	for (i = 0; i < mProfileNodeListSize(&profile->nodes); ++i) {
+		const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		if (!node->recursiveCalls) {
+			continue;
+		}
+		const char* name = mProfileFunctionListGetConstPointer(&profile->functions, node->function)->name;
+		if (strcmp(name, "recurse") != 0 && strcmp(name, "mutualA") != 0 && strcmp(name, "mutualB") != 0) {
+			fail_msg("Unexpected recursion in %s: %" PRIu64 " recursive calls", name, node->recursiveCalls);
+		}
+	}
+
+	core->detachDebugger(core);
+	mDebuggerDeinit(&debugger);
+	mDebuggerProfilerDeinit(profiler);
+	free(profiler);
+	mCoreConfigDeinit(&core->config);
+	core->deinit(core);
+}
+
+// Not #ifdef inside the suite macro's arguments, which MSVC doesn't accept
+#define PROFILE_ROM_TESTS cmocka_unit_test(profileTestROM),
+#else
+#define PROFILE_ROM_TESTS
+#endif
+
 M_TEST_DEFINE(treeSaveLoadAndExport) {
 	struct RecorderTest test;
 	_setupProgram(&test);
@@ -849,4 +1046,5 @@ M_TEST_SUITE_DEFINE(Profile, cmocka_unit_test(countersAndRegions), cmocka_unit_t
                     cmocka_unit_test(recorderRecursion), cmocka_unit_test(recorderTailCalls),
                     cmocka_unit_test(recorderInterrupts), cmocka_unit_test(recorderUnwinding),
                     cmocka_unit_test(recorderTrampolineAndFallThrough), cmocka_unit_test(recorderHiddenJumps),
-                    cmocka_unit_test(treeSaveLoadAndExport))
+                    cmocka_unit_test(recorderBiosInternalCalls), cmocka_unit_test(treeSaveLoadAndExport),
+                    PROFILE_ROM_TESTS)
