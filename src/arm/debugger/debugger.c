@@ -280,6 +280,7 @@ static enum mStackTraceMode ARMDebuggerGetStackTraceMode(struct mDebuggerPlatfor
 static void ARMDebuggerSetStackTraceMode(struct mDebuggerPlatform*, enum mStackTraceMode);
 static bool ARMDebuggerUpdateStackTrace(struct mDebuggerPlatform* d);
 static void ARMDebuggerNextInstructionInfo(struct mDebuggerPlatform* d, struct mDebuggerInstructionInfo*);
+static void ARMDebuggerRegisterSnapshot(struct mDebuggerPlatform* d, struct mDebuggerRegisterSnapshot*);
 
 struct mDebuggerPlatform* ARMDebuggerPlatformCreate(void) {
 	struct mDebuggerPlatform* platform = (struct mDebuggerPlatform*) malloc(sizeof(struct ARMDebugger));
@@ -299,6 +300,7 @@ struct mDebuggerPlatform* ARMDebuggerPlatformCreate(void) {
 	platform->setStackTraceMode = ARMDebuggerSetStackTraceMode;
 	platform->updateStackTrace = ARMDebuggerUpdateStackTrace;
 	platform->nextInstructionInfo = ARMDebuggerNextInstructionInfo;
+	platform->registerSnapshot = ARMDebuggerRegisterSnapshot;
 	return platform;
 }
 
@@ -658,4 +660,14 @@ static void ARMDebuggerNextInstructionInfo(struct mDebuggerPlatform* d, struct m
 	}
 
 	// TODO Access types
+}
+
+static void ARMDebuggerRegisterSnapshot(struct mDebuggerPlatform* d, struct mDebuggerRegisterSnapshot* snapshot) {
+	struct ARMDebugger* debugger = (struct ARMDebugger*) d;
+	struct ARMCore* cpu = debugger->cpu;
+	snapshot->width = _ARMInstructionLength(cpu);
+	snapshot->pc = cpu->gprs[ARM_PC] - snapshot->width;
+	snapshot->status = cpu->cpsr.packed;
+	snapshot->sp = cpu->gprs[ARM_SP];
+	snapshot->lr = cpu->gprs[ARM_LR];
 }

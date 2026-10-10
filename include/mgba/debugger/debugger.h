@@ -155,6 +155,14 @@ struct mDebuggerInstructionInfo {
 	mDebuggerAccessLogFlagsEx flagsEx[INSN_LENGTH_MAX];
 };
 
+struct mDebuggerRegisterSnapshot {
+	uint32_t pc;
+	uint32_t status;
+	uint32_t sp;
+	uint32_t lr;
+	unsigned width;
+};
+
 DECLARE_VECTOR(mBreakpointList, struct mBreakpoint);
 DECLARE_VECTOR(mWatchpointList, struct mWatchpoint);
 DECLARE_VECTOR(mDebuggerModuleList, struct mDebuggerModule*);
@@ -210,6 +218,7 @@ struct mDebuggerPlatform {
 	bool (*updateStackTrace)(struct mDebuggerPlatform* d);
 
 	void (*nextInstructionInfo)(struct mDebuggerPlatform* d, struct mDebuggerInstructionInfo* info);
+	void (*registerSnapshot)(struct mDebuggerPlatform* d, struct mDebuggerRegisterSnapshot* snapshot);
 };
 
 struct mDebugger {

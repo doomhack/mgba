@@ -98,6 +98,7 @@ struct mDebuggerPlatform* SM83DebuggerPlatformCreate(void) {
 	platform->d.setStackTraceMode = NULL;
 	platform->d.updateStackTrace = NULL;
 	platform->d.nextInstructionInfo = SM83DebuggerNextInstructionInfo;
+	platform->d.registerSnapshot = NULL;
 	platform->printStatus = NULL;
 	return &platform->d;
 }
