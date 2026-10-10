@@ -137,7 +137,7 @@ if snap.pc != lastPC + lastWidth:          // control flow changed
 lastPC = snap.pc; lastWidth = snap.width
 ```
 
-Most instructions run in sequence, so a BRANCH event goes out for roughly one instruction in six to ten. The producer doesn't classify branches. Calls, returns, interrupt entries and exits are all just "the PC went somewhere unexpected", with the registers needed to tell them apart later.
+Most instructions run in sequence, so a BRANCH event goes out for roughly one instruction in eighteen (measured on GBADoom). The producer doesn't classify branches. Calls, returns, interrupt entries and exits are all just "the PC went somewhere unexpected", with the registers needed to tell them apart later.
 
 **Events.** Fixed-size 32-byte records:
 
@@ -366,11 +366,24 @@ There is no new option: the profiler is part of `ENABLE_DEBUGGERS`. The core lib
 
 Profiling switches emulation from `runLoop` to one `step` per instruction. That costs wall-clock speed but has no effect on emulated cycle counts. The measurement is deterministic, unlike a sampling profiler.
 
-The profiler's own inline cost per instruction is a register snapshot (a few loads), one clock read, two counter comparisons, a page lookup with two adds, and one compare. On roughly one instruction in six to ten it also writes a 32-byte event into the ring. So the remaining cost is mostly the debugger's step-per-instruction loop itself.
+The profiler's own inline cost per instruction is a register snapshot (a few loads), one clock read, two counter comparisons, a page lookup with two adds, and one compare. On roughly one instruction in eighteen it also writes a 32-byte event into the ring. So the remaining cost is mostly the debugger's step-per-instruction loop itself.
 
-The consumer needs to keep up with about one event per six to ten emulated instructions. Each event costs a cached symbol lookup and an O(1) tree operation, which is well within one host core. If it falls behind, backpressure slows emulation rather than losing data.
+The consumer needs to keep up with about one event per eighteen emulated instructions. Each event costs a cached symbol lookup and an O(1) tree operation, which is well within one host core. If it falls behind, backpressure slows emulation rather than losing data.
 
-Target (objective 6): 50% of full speed or better for GBADoom on the author's machine. Milestone 1 measures it first: run a fixed number of frames in-process with and without the profiler attached, and time both. If the target is missed, the fixes in order of increasing invasiveness are:
+Target (objective 6): 50% of full speed or better for GBADoom on the author's machine.
+
+**Measured baseline (milestone 1, 2026-10-10).** GBADoom (shareware), 3,000 frames after 300 warm-up frames, `RelWithDebInfo` MSVC build, idle-loop optimisation off, silent logger, measured in-process:
+
+| Setup | Speed |
+|---|---|
+| Plain `runFrame` | 1162% of full speed |
+| Debugger attached, idle | 1146% |
+| Per-instruction callback mode, no-op module | 332% |
+| Callback mode with a sketch of the producer (registers, clock, page-table counter, 32-byte event on each branch) | 295% |
+
+The step-per-instruction loop costs about 3.5×, and the producer's own work about 13% on top, leaving roughly six times the target. GBADoom ran about 116,000 instructions per frame, with one branch event per 18.3 instructions, so the event stream is about 380,000 events (12 MB) per emulated second. The consumer thread's load and the Qt frontend's rendering aren't included, and debug builds will be slower, but there's plenty of headroom.
+
+If later measurements miss the target, the fixes in order of increasing invasiveness are:
 
 1. Profile the producer and fix whatever is slow in it.
 2. Tune the ring size and the consumer's wake-up threshold, if backpressure is what's slowing emulation.
@@ -415,7 +428,7 @@ Candidates, in no particular order:
   - Implemented as a derived view in the core library, so the CLI debugger can offer it too.
 - **Demangling in the SDL CLI debugger:** a C demangler covering the common subset of the Itanium scheme, falling back to the mangled name, so C-only frontends can register it through the same hook.
 - **Profile-guided optimisation (PGO).** Let GCC's PGO be used for GBA games, with mGBA collecting the profile. See "Future: profile-guided optimisation" below.
-- **Raw trace recording:** write the event stream to a file and analyse it later. It's roughly 20 MB per emulated second, so it's for short captures, but it allows re-analysing one run with different settings, for example with recursion unfolded, without recording again.
+- **Raw trace recording:** write the event stream to a file and analyse it later. It's roughly 12 MB per emulated second (measured on GBADoom), so it's for short captures, but it allows re-analysing one run with different settings, for example with recursion unfolded, without recording again.
 - Headless profiling through `mgba-perf` (`--profile FILE`) for scripts and CI; Lua bindings.
 - Input recording for reproducible comparisons.
 - Better support for ROMs without symbols.
