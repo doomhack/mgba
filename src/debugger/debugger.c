@@ -163,7 +163,8 @@ void mDebuggerRunTimeout(struct mDebugger* debugger, int32_t timeoutMs) {
 			}
 		}
 		if (debugger->state == DEBUGGER_PAUSED && !anyPaused) {
-			debugger->state = DEBUGGER_RUNNING;
+			// Resume in callback mode if a module still needs per-instruction callbacks
+			mDebuggerUpdatePaused(debugger);
 		}
 		break;
 	case DEBUGGER_CREATED:
