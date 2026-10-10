@@ -71,7 +71,11 @@ static inline int ConditionWake(Condition* cond) {
 
 static inline int ThreadCreate(Thread* thread, ThreadEntry entry, void* context) {
 	*thread = CreateThread(NULL, 0, entry, context, 0, 0);
-	return GetLastError();
+	// GetLastError is only meaningful on failure; on success it can hold a stale error
+	if (!*thread) {
+		return GetLastError();
+	}
+	return 0;
 }
 
 static inline int ThreadJoin(Thread* thread) {
