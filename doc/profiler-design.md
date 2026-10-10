@@ -37,8 +37,8 @@ Version 1 is done when all of these hold:
 2. **All time accounted for.** Over a recording, the cycles charged to code, IRQ handlers, DMA and idle add up to exactly the emulated time elapsed. Automated tests check this.
 3. **Correct attribution.** IRQ handlers, including nested ones, appear only under the `[IRQ]` root. DMA started by code is charged to that code. Hardware-triggered DMA and idle time appear in their own buckets. A purpose-built test ROM verifies all of this against known costs.
 4. **Useful reports.** Every profile has both views of the data (§6):
-   - a **call tree**: what was called from where, with call counts and self and subtree (inclusive) cycles at each node;
-   - a **flat function list**: one row per function with call count, self and inclusive cycles, and its callers and callees.
+   - a **call tree**: what was called from where, with call counts and self and subtree (inclusive) cycles at each node. Recursion is folded into the existing node rather than nesting, so deep recursion such as BSP traversal stays one level, with its recursive calls counted separately;
+   - a **flat function list**: one row per function with call count, recursive call count, self and inclusive cycles, and its callers and callees.
 
    Also per-instruction cycles with disassembly from mGBA's own decoder, and frame-budget figures: average and worst frame, as cycles and as a percentage of the 280,896-cycle frame, with idle time excluded.
 5. **Save, open, compare.** Profiles save to a native file that reopens in mGBA with the full call tree, flat list, per-instruction data and frame figures intact, and two can be compared side by side. They also export as callgrind files for KCachegrind/QCachegrind. Runs are not made reproducible, so a comparison includes run-to-run variation, and the UI says so.
@@ -118,12 +118,21 @@ The profiler enables `STACK_TRACE_ENABLED` while recording. Then, for each sampl
 2. The call path is the function containing each frame's `entryAddress`.
 3. The leaf is the function containing the PC. If that differs from the top frame's function (a tail call, `B` into another function, or fall-through), the leaf is added as a child of the top frame's node. That way cycles always go to the code that actually ran.
 
-The tree is stored as nodes keyed by `(parent, function)`. The profiler keeps a pointer to the current node, and when the stack depth and top frame haven't changed (the common case) it reuses that node without re-walking the stack.
+The tree is stored as nodes keyed by `(parent, function)`. The profiler keeps a node stack in step with the stack trace: a frame push pushes a node and a frame pop pops one. Both are O(1) however deep the stack is, and when the stack hasn't changed (the common case) the current node is reused without looking at the stack at all.
+
+**Recursion folding.** Recursion is always folded while recording. When a function is entered while it's already on the current path, the profiler doesn't create a child node. It pushes the nearest ancestor node for that function onto the node stack again, so the recursive call's cycles are charged to that existing node. When the recursive call returns, the pop restores the previous node. The same rule applies to tail-call leaves (step 3).
+
+Finding the ancestor doesn't search the stack. Each context keeps an array, indexed by function id, of the node where that function is currently active on the path, or none. A non-folded entry sets the slot and its pop clears it. A folded entry reads the slot and leaves it alone. Each node-stack entry records which of the two it was, so every call and return stays O(1) however deep the recursion goes.
+
+- This covers direct recursion (`R_RenderBSPNode` calling itself) and mutual recursion (A → B → A → B …). Both would otherwise build chains hundreds of nodes deep.
+- Folding A → B → A gives the tree A → B: the inner A's cycles go to the outer A node, and calls the inner A makes land under the outer A node.
+- A function appears at most once on any path from a root. The flat list (§6) relies on this.
+- Folding never crosses contexts: a function that runs in both main code and an IRQ handler has separate nodes under each root.
 
 Calls are counted on entry, not per sample:
 
-- A stack frame being pushed counts one call on the new node.
-- Control moving from the top frame's function into a different leaf function (a tail call or plain branch, step 3) counts one call on that leaf node.
+- A stack frame being pushed counts one call on the new node. If the entry was folded, it counts one *recursive call* on the reused ancestor node instead, so ordinary call counts aren't inflated by recursion.
+- Control moving from the top frame's function into a different leaf function (a tail call or plain branch, step 3) counts one call on that leaf node, with the same folding rule.
 - Returning to a function after its callee finishes is not a call.
 - Each interrupt entry counts one call on the `[IRQ]` root, so its count is the number of interrupts taken.
 - `[DMA n]` and `[SWI …]` count one call per DMA transfer or SWI.
@@ -173,11 +182,12 @@ void mProfileEndFrame(struct mProfile*);
 ```
 
 - **Functions**: a table of symbols and pseudo-functions (`[IRQ]`, `[Idle]`, `[DMA n]`, `[BIOS]`, `[unknown …]`, `[SWI …]`).
-- **Call tree** (recorded): nodes `{function, parent, children (Table by function id), calls, selfCycles}`. Each distinct call path gets its own node, so the same function called from two places appears twice with separate counts and cycles. Recursion is kept as it happened: each recursion level is a deeper node.
+- **Call tree** (recorded): nodes `{function, parent, children (Table by function id), calls, recursiveCalls, selfCycles}`. Each distinct call path gets its own node, so the same function called from two places appears twice with separate counts and cycles. Recursion is folded (§4), so a function appears at most once on any path.
+- **Recursion edges** (recorded): a small table of `(caller function, callee function) → count` for folded entries. A folded entry doesn't create a tree edge, so this table keeps "who recursed into whom" for the flat list. It's only touched on recursive entries.
 - **Flat function list** (derived from the tree when a recording stops or a file loads, never while recording):
-  - *calls* and *self cycles*: the sums over all of the function's nodes;
-  - *inclusive cycles*: the sum of the subtree cycles of the function's nodes that have no ancestor of the same function, so recursion isn't counted twice;
-  - *callers* and *callees*: for each caller→callee function pair, the calls and the callee's inclusive cycles summed over all tree edges between them.
+  - *calls*, *recursive calls* and *self cycles*: the sums over all of the function's nodes;
+  - *inclusive cycles*: the sum of the subtree cycles of the function's nodes. Folding guarantees none of those nodes is inside another, so nothing is counted twice;
+  - *callers* and *callees*: for each caller→callee function pair, the calls and the callee's inclusive cycles summed over all tree edges between them, plus recursive calls from the recursion-edge table.
 
   Every figure is also shown as a percentage of total recorded cycles.
 - **Instructions**: arrays allocated lazily for each function, sized from `st_size` and indexed by `(pc - start) >> 1`, holding `{cycles, executions}`. Unknown regions use a sparse `Table`. No address-wide arrays (ROM alone would need 128 MB).
@@ -191,7 +201,7 @@ Recording can start and stop at any time, or "reset and start" from boot, or "st
 **Native format (`.mprof`): save and open.** Callgrind can't hold the call tree. It stores costs per function and caller→callee edges merged across call sites, not call paths, so subtree timings would be lost on reload. The native format stores exactly what was recorded:
 
 - Text, line-oriented and versioned, so it's easy to write and parse in C, and diffable. Unknown record types are skipped, so later versions can add data without breaking older readers.
-- A header with the metadata (§6), then records for the function table, the call tree (one line per node: id, parent, function, calls, self cycles), per-instruction costs and per-frame cycles.
+- A header with the metadata (§6), then records for the function table, the call tree (one line per node: id, parent, function, calls, recursive calls, self cycles), recursion edges, per-instruction costs and per-frame cycles.
 - Only recorded data is stored. Inclusive cycles and the flat list are recomputed on load by the same code that derives them after recording, so the two can't disagree.
 
 Writer and reader live in the core library (`profile.c`), so any frontend can save and load.
@@ -227,8 +237,8 @@ This is also the first frontend built (milestone 1), because it's the quickest w
 **Qt** (`src/platform/qt/ProfilerController.{h,cpp}`, `ProfilerView.{h,cpp,ui}`, modelled on `MemoryAccessLogController` / `MemoryAccessLogView`), under Tools → Profiler:
 
 1. Start/stop/reset recording, symbol file selection, a live top-N function list refreshed on a timer, and a notice when idle-loop optimisation is on.
-2. **Call tree** view: expandable tree with calls, self cycles, subtree cycles and percentages at each node, sorted by subtree cycles.
-3. **Flat list** view: sortable table of functions with calls, self and inclusive cycles and percentages. Selecting a function shows its callers and callees (with calls and cycles for each), and its per-instruction costs disassembled with mGBA's own decoder. Selecting a function in either view can jump to its nodes in the other.
+2. **Call tree** view: expandable tree with calls, recursive calls, self cycles, subtree cycles and percentages at each node, sorted by subtree cycles.
+3. **Flat list** view: sortable table of functions with calls, recursive calls, self and inclusive cycles and percentages. Selecting a function shows its callers and callees (with calls and cycles for each), and its per-instruction costs disassembled with mGBA's own decoder. Selecting a function in either view can jump to its nodes in the other.
 4. A frame-budget summary: average and worst frame, as cycles and as a percentage of the budget.
 5. Save and open `.mprof` files; export callgrind.
 6. Compare two profiles: the flat lists side by side matched by function name, and the trees matched by call path, each with cycle and percentage deltas. Frame-budget figures are compared too, and the view notes that runs aren't reproducible.
@@ -267,7 +277,7 @@ This is the biggest unknown in the design, so milestone 1 measures it first: run
 
 ## Testing
 
-- **Unit tests** (cmocka, `BUILD_SUITE`): feed synthetic sample sequences into `mProfileRecord`. Check self/subtree totals, tree shape and call counts for calls, tail calls and recursion, context separation, frame accounting, and that the total equals the sum of inputs. Check the derived flat list: calls, self, recursion-safe inclusive cycles, and caller/callee figures. Check that `.mprof` files round-trip exactly (save, load, compare equal), and that the callgrind export's totals match the profile's.
+- **Unit tests** (cmocka, `BUILD_SUITE`): feed synthetic sample sequences into `mProfileRecord`. Check self/subtree totals, tree shape and call counts for calls, tail calls, context separation, frame accounting, and that the total equals the sum of inputs. Recursion folding: direct recursion several hundred levels deep stays one node; mutual recursion A → B → A folds to A → B; recursive calls are counted separately; returning out of folded calls restores the right node. Check the derived flat list: calls, recursive calls, self and inclusive cycles, and caller/callee figures including recursion edges. Check that `.mprof` files round-trip exactly (save, load, compare equal), and that the callgrind export's totals match the profile's.
 - **Test ROM**: a small devkitARM program with known cycle costs: fixed loops, nested calls, a timer IRQ (plain and nested), immediate and HBlank DMA, `VBlankIntrWait`, and a long-call veneer. Its source and a prebuilt binary are committed, so running the tests doesn't need devkitARM. A cmocka test loads it into a GBA core in-process, attaches the profiler, runs a fixed number of frames, and checks the profile against the expected buckets to within a tolerance (objectives 2 and 3).
 - **Regression against the prototype**: profile the same build of a real project (for example GBADoom) with both and compare the top functions. Differences should be explainable by the IRQ/DMA fixes.
 
@@ -282,7 +292,7 @@ Each milestone is a self-contained step that leaves the branch building and work
 
 ## After v1
 
-Candidates, in no particular order: headless profiling through `mgba-perf` (`--profile FILE`) for scripts and CI; Lua bindings; input recording for reproducible comparisons; better support for ROMs without symbols; per-frame drill-down (which functions made the worst frame expensive); a speedscope exporter for flame graphs; Game Boy support.
+Candidates, in no particular order: headless profiling through `mgba-perf` (`--profile FILE`) for scripts and CI; Lua bindings; input recording for reproducible comparisons; better support for ROMs without symbols; per-frame drill-down (which functions made the worst frame expensive); an option to record recursion unfolded; a speedscope exporter for flame graphs; Game Boy support.
 
 ## Decisions
 
@@ -296,6 +306,7 @@ Where there was a choice, the option that touches the least shared code wins, be
 - **D6. UI placement.** A Tools → Profiler window, in the same style as the memory access logger.
 - **D7. Frontends for v1.** Qt and the CLI debugger. Headless `mgba-perf` profiling and Lua move to "After v1".
 - **D8. Idle-loop optimisation.** Left as the user configured it; recorded in the profile and flagged in the UI, not overridden.
+- **D9. Recursion folding.** Always on, applied while recording, for both direct and mutual recursion: a recursive entry reuses the nearest ancestor node for that function. This keeps deep recursion readable, keeps the tree small, and makes inclusive figures simple. The cost is that the unfolded shape (which recursion depth spent what) isn't kept; an option to record it is listed under "After v1".
 
 ## Keeping the fork adoptable
 
