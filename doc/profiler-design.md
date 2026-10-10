@@ -41,7 +41,7 @@ Version 1 is done when all of these hold:
    - a **call tree**: what was called from where, with call counts and self and subtree (inclusive) cycles at each node. Recursion is folded into the existing node rather than nesting, so deep recursion such as BSP traversal stays one level, with its recursive calls counted separately;
    - a **flat function list**: one row per function with call count, recursive call count, self and inclusive cycles, and its callers and callees.
 
-   Also per-instruction cycles with disassembly from mGBA's own decoder, and frame-budget figures: average and worst frame, as cycles and as a percentage of the 280,896-cycle frame, with idle time excluded.
+   Also per-instruction cycles with disassembly from mGBA's own decoder, and frame-budget figures: average and worst frame, as cycles and as a percentage of the 280,896-cycle frame, with idle time excluded. C++ function names are shown demangled in the Qt frontend.
 5. **Save, open, compare.** Profiles save to a native file that reopens in mGBA with the full call tree, flat list, per-instruction data and frame figures intact, and two can be compared side by side. They also export as callgrind files for KCachegrind/QCachegrind. Runs are not made reproducible, so a comparison includes run-to-run variation, and the UI says so.
 6. **Playable while profiling.** With the profiler recording, GBADoom runs at 50% of full speed or better on the author's machine, so a game can be played into the scene of interest. Cycle counts are exact at any speed.
 7. **Two ways in.** Qt Tools → Profiler window, and the `profile` command in the CLI debugger (covering the SDL frontend).
@@ -54,7 +54,8 @@ Version 1 is done when all of these hold:
 - Recording raw event traces to disk for later analysis (see "After v1").
 - Better support for ROMs without symbols (address-based grouping, user-supplied symbol files other than ELF).
 - Game Boy (SM83) support. Interfaces stay platform-neutral where it costs nothing, so it can follow later.
-- DWARF line tables or source-level views. Both file formats leave room for adding source lines later.
+- Source-level views (see "After v1"). Nothing extra needs recording for them later, since they're computed from the per-instruction counters and the ELF.
+- Demangled names in the SDL CLI debugger (see §4 and "After v1").
 - Wall-clock (host) profiling of mGBA itself.
 
 ## Design
@@ -180,6 +181,15 @@ Each step's `delta` comes from `mTimingGlobalTime`, not `cpu->cycles`. It covers
 - Keep the functions in an array sorted by address. The consumer looks up branch targets with a last-hit cache first, then binary search.
 - Fallbacks when there is no symbol: `[BIOS]` for 0x00000000–0x00003FFF, otherwise `[unknown <region>]` for each memory region (ROM, IWRAM, EWRAM), so cycles are never dropped.
 - `mCoreLoadELFSymbols` discards sizes and types, so the profiler parses the ELF itself (decision D3) and leaves the shared symbol table unchanged.
+
+**C++ names.** The symbol table holds mangled names (`_ZN2bn10sprite_ptr12set_positionERKNS_9fixed_pointE`). These are kept as each function's identity everywhere: in the core, in `.mprof` files, and as the key when comparing profiles. They're unique even for overloads, so nothing is ambiguous. Demangling happens only when a name is displayed (decision D11):
+
+- The profile API has a display hook, `mProfileSetDemangler(struct mProfile*, size_t (*demangle)(const char* mangled, char* out, size_t size))`. Without one, mangled names are shown.
+- The Qt frontend vendors LLVM's Itanium demangler (`src/third-party/llvm-demangle`, C++, Apache-2.0 with LLVM exception, written to be copied into other projects) and registers it. Qt's debugger console runs the same CLI debugger code, so it shows demangled names too.
+- The core stays C, so the SDL CLI debugger shows mangled names in v1 (see "After v1").
+- A name that fails to demangle is shown mangled, never dropped.
+- Template-heavy names get very long, so the views offer a short form that drops template arguments and parameter lists (`bn::sprite_ptr::set_position`), with the full name in a tooltip and in exports.
+- Callgrind exports contain mangled names. KCachegrind demangles them itself.
 
 **Two independent paths to self cycles.** A function's self cycles can be summed from the per-instruction counters over its address range, or from the call tree's nodes for that function. The two are computed independently, by the producer and the consumer, so they must agree exactly. Tests check this, and a debug build can assert it on stop.
 
@@ -318,7 +328,7 @@ This is also the first frontend built (milestone 1), because it's the quickest w
 
 1. Start/stop/reset recording, symbol file selection, a live top-N function list refreshed on a timer from consumer snapshots (§2), and a notice when idle-loop optimisation is on.
 2. **Call tree** view: expandable tree with calls, recursive calls, self cycles, subtree cycles and percentages at each node, sorted by subtree cycles.
-3. **Flat list** view: sortable table of functions with calls, recursive calls, self and inclusive cycles and percentages. Selecting a function shows its callers and callees (with calls and cycles for each), and its per-instruction costs disassembled with mGBA's own decoder. Selecting a function in either view can jump to its nodes in the other.
+3. **Flat list** view: sortable, searchable table of functions with calls, recursive calls, self and inclusive cycles and percentages. Names are demangled, with a short/full name toggle (§4). Selecting a function shows its callers and callees (with calls and cycles for each), and its per-instruction costs disassembled with mGBA's own decoder. Selecting a function in either view can jump to its nodes in the other.
 4. A frame-budget summary: average and worst frame, as cycles and as a percentage of the budget.
 5. Save and open `.mprof` files; export callgrind.
 6. Compare two profiles: the flat lists side by side matched by function name, and the trees matched by call path, each with cycle and percentage deltas. Frame-budget figures are compared too, and the view notes that runs aren't reproducible.
@@ -368,6 +378,7 @@ Target (objective 6): 50% of full speed or better for GBADoom on the author's ma
   - `.mprof` files round-trip exactly (save, load, compare equal), and the callgrind export's totals match the profile's.
 - **Pipeline tests**: the same event stream through the threaded path with a deliberately tiny ring (forcing backpressure), and through a single-threaded drain, gives identical profiles. Also: per-function self cycles from the instruction counters equal those from the tree.
 - **Test ROM**: a small devkitARM program with known cycle costs: fixed loops, nested calls, a timer IRQ (plain and nested), immediate and HBlank DMA, `VBlankIntrWait`, and a long-call veneer. Its source and a prebuilt binary are committed, so running the tests doesn't need devkitARM. A cmocka test loads it into a GBA core in-process, attaches the profiler, runs a fixed number of frames, and checks the profile against the expected buckets to within a tolerance (objectives 2 and 3).
+- **Demangling**: a list of mangled names with their expected output, generated with `arm-none-eabi-c++filt` from a real C++ project (for example a Butano build), checked against the Qt demangler hook. Includes names that should fail and fall back to the mangled form, and checks of the short-name form. The test ROM also includes one C++ translation unit, so the end-to-end test sees a mangled symbol.
 - **Regression against the prototype**: profile the same build of a real project (for example GBADoom) with both and compare the top functions. Differences should be explainable by the IRQ/DMA fixes.
 
 ## Milestones
@@ -375,7 +386,7 @@ Target (objective 6): 50% of full speed or better for GBADoom on the author's ma
 1. **Flat profile.** Speed measurement first. Then the module, `registerSnapshot`, the producer with per-instruction counters, symbols (with veneer folding), per-function self cycles summed from the counters, `.mprof` save/load and callgrind export of that data, the CLI debugger `profile` command (`start`/`stop`/`reset`/`symbols`/`save`/`export`/`top`), and unit tests. No events or threads yet.
 2. **Event pipeline, call tree and IRQ context.** Branch events, the ring and the consumer thread (and the no-threads fallback), call/return/interrupt reconstruction, the call tree with call counting and recursion folding, the derived flat list (inclusive cycles, callers, callees), `profile tree` and `profile func`, the consumer and pipeline tests, the test ROM and its in-process test, and checking that the CLI debugger still works while profiling.
 3. **DMA, idle and frames.** GBA core counters, DMA/HALT/SWI/FRAME events, DMA and idle buckets, SWI pseudo-functions, frame-budget figures.
-4. **Qt UI.** Controller and live view, call tree and flat list views with cross-navigation, callers/callees, per-instruction disassembly, frame-budget summary, save/open/export, compare.
+4. **Qt UI.** Controller and live view, call tree and flat list views with cross-navigation, callers/callees, per-instruction disassembly, frame-budget summary, save/open/export, compare, the vendored demangler with short/full names, and the demangling tests.
 
 Each milestone is a self-contained step that leaves the branch building and working. Version 1 is complete when all the objectives above hold.
 
@@ -383,6 +394,12 @@ Each milestone is a self-contained step that leaves the branch building and work
 
 Candidates, in no particular order:
 
+- **Source-level view.** Selecting a function shows its source code with cycles and executions per line, next to the existing per-instruction view, plus a mixed view with each source line followed by its instructions (as `objdump -S` does).
+  - No new recording is needed: per-line figures are the sums of the per-instruction counters for every address the line table maps to that line. It works on saved `.mprof` files too, as long as the ELF is available.
+  - Needs a small C reader for the DWARF line table (`.debug_line`, plus `.debug_line_str` for DWARF 5) in the core library: only the line-number program, not the rest of DWARF. It must handle DWARF versions 2 to 5. Recent GCC versions, including current devkitARM, emit DWARF 5 by default, which libelfin (used by the prototype) doesn't read; that's a likely reason the prototype couldn't get line information.
+  - Instructions from one source line are often scattered, and inlined code maps to the inlined function's file and lines, so a function's source view groups lines by file and includes headers where code was inlined.
+  - Source files are read from the paths recorded in DWARF (compilation directory plus file name). A user-set path remapping covers projects built on another machine or in a container. A missing file still shows per-line figures, keyed by file and line number.
+- **Demangling in the SDL CLI debugger:** a C demangler covering the common subset of the Itanium scheme, falling back to the mangled name, so C-only frontends can register it through the same hook.
 - **Raw trace recording:** write the event stream to a file and analyse it later. It's roughly 20 MB per emulated second, so it's for short captures, but it allows re-analysing one run with different settings, for example with recursion unfolded, without recording again.
 - Headless profiling through `mgba-perf` (`--profile FILE`) for scripts and CI; Lua bindings.
 - Input recording for reproducible comparisons.
@@ -406,6 +423,7 @@ Where there was a choice, the option that touches the least shared code wins, be
 - **D8. Idle-loop optimisation.** Left as the user configured it; recorded in the profile and flagged in the UI, not overridden.
 - **D9. Recursion folding.** Always on, applied while recording, for both direct and mutual recursion: a recursive entry reuses the nearest ancestor node for that function. This keeps deep recursion readable, keeps the tree small, and makes inclusive figures simple. The cost is that the unfolded shape (which recursion depth spent what) isn't kept; an option to record it, and raw trace recording that would allow re-analysis, are listed under "After v1".
 - **D10. Event pipeline.** Inline work is limited to per-instruction counters and fixed-size events on control-flow changes, DMA, halt, SWIs and frame ends. Events go through a lock-free ring to a consumer thread, with backpressure rather than dropping, and the same consumer code runs on the emulation thread in builds without threads.
+- **D11. Demangling.** Mangled names are the identity everywhere; demangling is display-only, through a hook. Qt supplies a vendored copy of LLVM's Itanium demangler, because it's complete and permissively licensed, and keeping it in the Qt frontend keeps C++ out of the core library. GCC's own demangler (libiberty) isn't used because of its GPL licensing, and `__cxa_demangle` isn't available in MSVC builds.
 
 ## Keeping the fork adoptable
 
