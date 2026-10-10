@@ -7,6 +7,7 @@ set(SOURCE_FILES
 	profile.c
 	profile-elf.c
 	profile-io.c
+	profiler.c
 	symbols.c
 	stack-trace.c)
 

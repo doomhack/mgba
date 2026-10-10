@@ -1348,6 +1348,7 @@ static bool _GBACoreSupportsDebuggerType(struct mCore* core, enum mDebuggerType 
 	case DEBUGGER_CUSTOM:
 	case DEBUGGER_CLI:
 	case DEBUGGER_GDB:
+	case DEBUGGER_PROFILER:
 		return true;
 	default:
 		return false;
