@@ -112,7 +112,7 @@ static struct CLIDebuggerCommandSummary _debuggerCommands[] = {
 	{ "print", _print, "S+", "Print a value" },
 	{ "print/t", _printBin, "S+", "Print a value as binary" },
 	{ "print/x", _printHex, "S+", "Print a value as hexadecimal" },
-	{ "profile", _profile, "ss", "Profile execution (start, stop, reset, symbols, save, export, top)" },
+	{ "profile", _profile, "ss", "Profile execution (start, stop, reset, symbols, save, export, top, tree, func)" },
 	{ "quit", _quit, "", "Quit the emulator" },
 	{ "reset", _reset, "", "Reset the emulation" },
 	{ "r/1", _readByte, "I", "Read a byte from a specified offset" },
@@ -1568,9 +1568,6 @@ static void _destroyProfiler(struct CLIDebugger* debugger) {
 
 static void _profileStatus(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler) {
 	struct mProfile* profile = &profiler->profile;
-	if (!profile->finished) {
-		mProfileFinish(profile);
-	}
 	debugger->backend->printf(debugger->backend, "Profiler: %s\n", profiler->recording ? "recording" : "stopped");
 	if (profile->symbolSource) {
 		debugger->backend->printf(debugger->backend, "Symbols: %u functions from %s\n", (unsigned) profile->symbolCount, profile->symbolSource);
@@ -1602,22 +1599,154 @@ static void _profileTop(struct CLIDebugger* debugger, struct mDebuggerProfiler* 
 		count = requested;
 	}
 	struct mProfile* profile = &profiler->profile;
-	mProfileFinish(profile);
 	if (!profile->totalCycles) {
 		debugger->backend->printf(debugger->backend, "No profile data.\n");
 		return;
 	}
 	size_t* indices = malloc(sizeof(*indices) * count);
 	count = mProfileTopFunctions(profile, indices, count);
-	debugger->backend->printf(debugger->backend, "  Self %%     Self cycles       Executions  Function\n");
+	debugger->backend->printf(debugger->backend, "  Self %%     Self cycles   Incl %%        Calls  Function\n");
 	size_t i;
 	for (i = 0; i < count; ++i) {
 		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, indices[i]);
-		debugger->backend->printf(debugger->backend, "%7.2f%% %15" PRIu64 " %16" PRIu64 "  %s\n",
-		                          function->selfCycles * 100.0 / profile->totalCycles,
-		                          function->selfCycles, function->executions, function->name);
+		debugger->backend->printf(debugger->backend, "%7.2f%% %15" PRIu64 " %7.2f%% %12" PRIu64 "  %s\n",
+		                          function->selfCycles * 100.0 / profile->totalCycles, function->selfCycles,
+		                          function->inclusiveCycles * 100.0 / profile->totalCycles, function->calls,
+		                          function->name);
 	}
 	free(indices);
+}
+
+static int _compareSubtree(const void* a, const void* b, void* context) {
+	const struct mProfile* profile = context;
+	uint64_t ca = mProfileNodeListGetConstPointer(&profile->nodes, *(const uint32_t*) a)->subtreeCycles;
+	uint64_t cb = mProfileNodeListGetConstPointer(&profile->nodes, *(const uint32_t*) b)->subtreeCycles;
+	return ca < cb ? 1 : ca > cb ? -1 : 0;
+}
+
+static void _sortNodes(const struct mProfile* profile, uint32_t* nodes, size_t count) {
+	// Insertion sort: child lists are short, and qsort has no portable context argument
+	size_t i;
+	for (i = 1; i < count; ++i) {
+		uint32_t node = nodes[i];
+		size_t j = i;
+		while (j > 0 && _compareSubtree(&nodes[j - 1], &node, (void*) profile) > 0) {
+			nodes[j] = nodes[j - 1];
+			--j;
+		}
+		nodes[j] = node;
+	}
+}
+
+static void _profileTreeNode(struct CLIDebugger* debugger, const struct mProfile* profile, uint32_t index,
+                             unsigned depth, unsigned maxDepth) {
+	const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, index);
+	const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, node->function);
+	char indent[2 * 32 + 1];
+	unsigned width = depth < 32 ? depth : 32;
+	memset(indent, ' ', width * 2);
+	indent[width * 2] = '\0';
+	char recursion[32] = "";
+	if (node->recursiveCalls) {
+		snprintf(recursion, sizeof(recursion), " +%" PRIu64 " recursive", node->recursiveCalls);
+	}
+	debugger->backend->printf(debugger->backend, "%7.2f%% %7.2f%% %12" PRIu64 "  %s%s%s\n",
+	                          node->subtreeCycles * 100.0 / profile->totalCycles,
+	                          node->selfCycles * 100.0 / profile->totalCycles, node->calls, indent, function->name,
+	                          recursion);
+	if (depth >= maxDepth) {
+		return;
+	}
+
+	// Hide branches under 0.1% so the output stays readable
+	uint64_t threshold = profile->totalCycles / 1000;
+	size_t count = 0;
+	size_t capacity = 16;
+	uint32_t* children = malloc(sizeof(*children) * capacity);
+	size_t i;
+	for (i = index + 1; i < mProfileNodeListSize(&profile->nodes); ++i) {
+		const struct mProfileNode* child = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		if (child->parent != index || !child->subtreeCycles || child->subtreeCycles < threshold) {
+			continue;
+		}
+		if (count == capacity) {
+			capacity *= 2;
+			children = realloc(children, sizeof(*children) * capacity);
+		}
+		children[count] = i;
+		++count;
+	}
+	_sortNodes(profile, children, count);
+	for (i = 0; i < count; ++i) {
+		_profileTreeNode(debugger, profile, children[i], depth + 1, maxDepth);
+	}
+	free(children);
+}
+
+static void _profileTree(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler, struct CLIDebugVector* dv) {
+	unsigned maxDepth = 8;
+	if (dv) {
+		char* end;
+		unsigned long requested = strtoul(dv->charValue, &end, 10);
+		if (*end || !requested) {
+			debugger->backend->printf(debugger->backend, "%s\n", ERROR_INVALID_ARGS);
+			return;
+		}
+		maxDepth = requested;
+	}
+	const struct mProfile* profile = &profiler->profile;
+	if (!profile->totalCycles) {
+		debugger->backend->printf(debugger->backend, "No profile data.\n");
+		return;
+	}
+	debugger->backend->printf(debugger->backend, " Total %%  Self %%        Calls  Function\n");
+	_profileTreeNode(debugger, profile, mPROFILE_ROOT_MAIN, 0, maxDepth);
+	if (mProfileNodeListGetConstPointer(&profile->nodes, mPROFILE_ROOT_IRQ)->subtreeCycles) {
+		_profileTreeNode(debugger, profile, mPROFILE_ROOT_IRQ, 0, maxDepth);
+	}
+}
+
+static void _profileFunction(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler, struct CLIDebugVector* dv) {
+	if (!dv) {
+		debugger->backend->printf(debugger->backend, "%s\n", ERROR_MISSING_ARGS);
+		return;
+	}
+	const struct mProfile* profile = &profiler->profile;
+	ssize_t index = mProfileFindFunctionByName(profile, dv->charValue);
+	if (index < 0) {
+		debugger->backend->printf(debugger->backend, "No function named %s\n", dv->charValue);
+		return;
+	}
+	const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, index);
+	double total = profile->totalCycles ? (double) profile->totalCycles : 1.0;
+	debugger->backend->printf(debugger->backend, "%s\n", function->name);
+	debugger->backend->printf(debugger->backend, "  Self:      %" PRIu64 " cycles (%.2f%%), %" PRIu64 " executions\n",
+	                          function->selfCycles, function->selfCycles * 100.0 / total, function->executions);
+	debugger->backend->printf(debugger->backend, "  Inclusive: %" PRIu64 " cycles (%.2f%%)\n",
+	                          function->inclusiveCycles, function->inclusiveCycles * 100.0 / total);
+	debugger->backend->printf(debugger->backend, "  Calls:     %" PRIu64 " (+%" PRIu64 " recursive)\n",
+	                          function->calls, function->recursiveCalls);
+
+	unsigned pass;
+	for (pass = 0; pass < 2; ++pass) {
+		debugger->backend->printf(debugger->backend, pass ? "  Callees:\n" : "  Callers:\n");
+		size_t i;
+		for (i = 0; i < mProfileEdgeListSize(&profile->edges); ++i) {
+			const struct mProfileEdge* edge = mProfileEdgeListGetConstPointer(&profile->edges, i);
+			uint32_t other;
+			if (pass == 0 && edge->callee == (uint32_t) index) {
+				other = edge->caller;
+			} else if (pass == 1 && edge->caller == (uint32_t) index) {
+				other = edge->callee;
+			} else {
+				continue;
+			}
+			debugger->backend->printf(debugger->backend, "    %12" PRIu64 " calls %+" PRIi64 " recursive %7.2f%%  %s\n",
+			                          edge->calls, (int64_t) edge->recursiveCalls,
+			                          edge->inclusiveCycles * 100.0 / total,
+			                          mProfileFunctionListGetConstPointer(&profile->functions, other)->name);
+		}
+	}
 }
 
 #ifdef ENABLE_VFS
@@ -1627,6 +1756,10 @@ static void _profileFile(struct CLIDebugger* debugger, struct mDebuggerProfiler*
 		return;
 	}
 	if (strcmp(action, "symbols") == 0) {
+		if (profiler->recording) {
+			debugger->backend->printf(debugger->backend, "Stop recording before loading symbols.\n");
+			return;
+		}
 		struct VFile* vf = VFileOpen(dv->charValue, O_RDONLY);
 		if (!vf) {
 			debugger->backend->printf(debugger->backend, "Could not open %s\n", dv->charValue);
@@ -1641,9 +1774,6 @@ static void _profileFile(struct CLIDebugger* debugger, struct mDebuggerProfiler*
 		return;
 	}
 
-	if (!profiler->profile.finished) {
-		mProfileFinish(&profiler->profile);
-	}
 	struct VFile* vf = VFileOpen(dv->charValue, O_WRONLY | O_CREAT | O_TRUNC);
 	if (!vf) {
 		debugger->backend->printf(debugger->backend, "Could not open %s for writing\n", dv->charValue);
@@ -1671,10 +1801,14 @@ static void _profile(struct CLIDebugger* debugger, struct CLIDebugVector* dv) {
 		debugger->backend->printf(debugger->backend, "%s\n", ERROR_INVALID_ARGS);
 		return;
 	}
-	if (strcmp(action, "status") != 0 && strcmp(action, "start") != 0 && strcmp(action, "stop") != 0 &&
-	    strcmp(action, "reset") != 0 && strcmp(action, "top") != 0
+	bool reads = strcmp(action, "status") == 0 || strcmp(action, "top") == 0 || strcmp(action, "tree") == 0 ||
+	             strcmp(action, "func") == 0;
 #ifdef ENABLE_VFS
-	    && strcmp(action, "symbols") != 0 && strcmp(action, "save") != 0 && strcmp(action, "export") != 0
+	reads = reads || strcmp(action, "save") == 0 || strcmp(action, "export") == 0;
+#endif
+	if (!reads && strcmp(action, "start") != 0 && strcmp(action, "stop") != 0 && strcmp(action, "reset") != 0
+#ifdef ENABLE_VFS
+	    && strcmp(action, "symbols") != 0
 #endif
 	    ) {
 		debugger->backend->printf(debugger->backend, "Unknown profile command \"%s\"\n", action);
@@ -1685,8 +1819,26 @@ static void _profile(struct CLIDebugger* debugger, struct CLIDebugVector* dv) {
 	if (!profiler) {
 		return;
 	}
-	if (strcmp(action, "status") == 0) {
-		_profileStatus(debugger, profiler);
+	if (reads) {
+		// While recording, bring the call tree up to date and keep it still while reading it
+		mDebuggerProfilerLock(profiler);
+		if (profiler->recording || !profiler->profile.finished) {
+			mProfileFinish(&profiler->profile);
+		}
+		if (strcmp(action, "status") == 0) {
+			_profileStatus(debugger, profiler);
+		} else if (strcmp(action, "top") == 0) {
+			_profileTop(debugger, profiler, argument);
+		} else if (strcmp(action, "tree") == 0) {
+			_profileTree(debugger, profiler, argument);
+		} else if (strcmp(action, "func") == 0) {
+			_profileFunction(debugger, profiler, argument);
+#ifdef ENABLE_VFS
+		} else {
+			_profileFile(debugger, profiler, action, argument);
+#endif
+		}
+		mDebuggerProfilerUnlock(profiler);
 	} else if (strcmp(action, "start") == 0) {
 		if (profiler->recording) {
 			debugger->backend->printf(debugger->backend, "Already recording.\n");
@@ -1701,8 +1853,6 @@ static void _profile(struct CLIDebugger* debugger, struct CLIDebugVector* dv) {
 	} else if (strcmp(action, "reset") == 0) {
 		mDebuggerProfilerReset(profiler);
 		debugger->backend->printf(debugger->backend, "Profile data cleared.\n");
-	} else if (strcmp(action, "top") == 0) {
-		_profileTop(debugger, profiler, argument);
 #ifdef ENABLE_VFS
 	} else {
 		_profileFile(debugger, profiler, action, argument);
