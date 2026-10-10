@@ -1544,7 +1544,7 @@ static struct mDebuggerProfiler* _ensureProfiler(struct CLIDebugger* debugger) {
 	mDebuggerAttachModule(debugger->d.p, &profiler->d);
 	debugger->profiler = profiler;
 	if (mDebuggerProfilerAutoloadSymbols(profiler)) {
-		debugger->backend->printf(debugger->backend, "Loaded %" PRIz "u function symbols from %s\n", profiler->profile.symbolCount, profiler->profile.symbolSource);
+		debugger->backend->printf(debugger->backend, "Loaded %u function symbols from %s\n", (unsigned) profiler->profile.symbolCount, profiler->profile.symbolSource);
 	} else {
 		debugger->backend->printf(debugger->backend, "No symbols found next to the ROM; use \"profile symbols FILE\" to load an ELF.\n");
 	}
@@ -1573,7 +1573,7 @@ static void _profileStatus(struct CLIDebugger* debugger, struct mDebuggerProfile
 	}
 	debugger->backend->printf(debugger->backend, "Profiler: %s\n", profiler->recording ? "recording" : "stopped");
 	if (profile->symbolSource) {
-		debugger->backend->printf(debugger->backend, "Symbols: %" PRIz "u functions from %s\n", profile->symbolCount, profile->symbolSource);
+		debugger->backend->printf(debugger->backend, "Symbols: %u functions from %s\n", (unsigned) profile->symbolCount, profile->symbolSource);
 	} else {
 		debugger->backend->printf(debugger->backend, "Symbols: none\n");
 	}
@@ -1633,7 +1633,7 @@ static void _profileFile(struct CLIDebugger* debugger, struct mDebuggerProfiler*
 			return;
 		}
 		if (mDebuggerProfilerLoadSymbols(profiler, vf, dv->charValue)) {
-			debugger->backend->printf(debugger->backend, "Loaded %" PRIz "u function symbols\n", profiler->profile.symbolCount);
+			debugger->backend->printf(debugger->backend, "Loaded %u function symbols\n", (unsigned) profiler->profile.symbolCount);
 		} else {
 			debugger->backend->printf(debugger->backend, "Not a 32-bit ELF file with a symbol table\n");
 		}
