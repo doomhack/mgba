@@ -4,6 +4,9 @@ set(SOURCE_FILES
 	cli-debugger.c
 	debugger.c
 	parser.c
+	profile.c
+	profile-elf.c
+	profile-io.c
 	symbols.c
 	stack-trace.c)
 
@@ -21,7 +24,8 @@ endif()
 
 set(TEST_FILES
 	test/lexer.c
-	test/parser.c)
+	test/parser.c
+	test/profile.c)
 
 source_group("Debugger" FILES ${SOURCE_FILES})
 source_group("Debugger tests" FILES ${TEST_FILES})
