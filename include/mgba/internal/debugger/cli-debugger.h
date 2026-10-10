@@ -19,6 +19,7 @@ extern const char* INFO_BREAKPOINT_ADDED;
 extern const char* INFO_WATCHPOINT_ADDED;
 
 struct CLIDebugger;
+struct mDebuggerProfiler;
 struct VFile;
 
 struct CLIDebugVector {
@@ -90,6 +91,8 @@ struct CLIDebugger {
 	int traceRemaining;
 	struct VFile* traceVf;
 	bool skipStatus;
+
+	struct mDebuggerProfiler* profiler;
 };
 
 void CLIDebuggerCreate(struct CLIDebugger*);

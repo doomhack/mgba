@@ -14,6 +14,7 @@
 #include <mgba/core/timing.h>
 #include <mgba/core/version.h>
 #include <mgba/internal/debugger/parser.h>
+#include <mgba/internal/debugger/profiler.h>
 #include <mgba/internal/debugger/stack-trace.h>
 #ifdef USE_ELF
 #include <mgba-util/elf-read.h>
@@ -88,6 +89,8 @@ static void _source(struct CLIDebugger*, struct CLIDebugVector*);
 #endif
 static void _setSymbol(struct CLIDebugger*, struct CLIDebugVector*);
 static void _findSymbol(struct CLIDebugger*, struct CLIDebugVector*);
+static void _profile(struct CLIDebugger*, struct CLIDebugVector*);
+static void _destroyProfiler(struct CLIDebugger*);
 
 static struct CLIDebuggerCommandSummary _debuggerCommands[] = {
 	{ "backtrace", _backtrace, "i", "Print backtrace of all or specified frames" },
@@ -109,6 +112,7 @@ static struct CLIDebuggerCommandSummary _debuggerCommands[] = {
 	{ "print", _print, "S+", "Print a value" },
 	{ "print/t", _printBin, "S+", "Print a value as binary" },
 	{ "print/x", _printHex, "S+", "Print a value as hexadecimal" },
+	{ "profile", _profile, "ss", "Profile execution (start, stop, reset, symbols, save, export, top)" },
 	{ "quit", _quit, "", "Quit the emulator" },
 	{ "reset", _reset, "", "Reset the emulation" },
 	{ "r/1", _readByte, "I", "Read a byte from a specified offset" },
@@ -1257,6 +1261,7 @@ static void _cliDebuggerInit(struct mDebuggerModule* debugger) {
 
 static void _cliDebuggerDeinit(struct mDebuggerModule* debugger) {
 	struct CLIDebugger* cliDebugger = (struct CLIDebugger*) debugger;
+	_destroyProfiler(cliDebugger);
 	if (cliDebugger->traceVf) {
 		cliDebugger->traceVf->close(cliDebugger->traceVf);
 		cliDebugger->traceVf = NULL;
@@ -1309,6 +1314,7 @@ void CLIDebuggerCreate(struct CLIDebugger* debugger) {
 
 	debugger->system = NULL;
 	debugger->backend = NULL;
+	debugger->profiler = NULL;
 }
 
 void CLIDebuggerAttachSystem(struct CLIDebugger* debugger, struct CLIDebuggerSystem* system) {
@@ -1522,5 +1528,184 @@ static void _findSymbol(struct CLIDebugger* debugger, struct CLIDebugVector* dv)
 		}
 	} else {
 		debugger->backend->printf(debugger->backend, "Not found.\n");
+	}
+}
+
+static struct mDebuggerProfiler* _ensureProfiler(struct CLIDebugger* debugger) {
+	if (debugger->profiler) {
+		return debugger->profiler;
+	}
+	if (!debugger->d.p->core->supportsDebuggerType(debugger->d.p->core, DEBUGGER_PROFILER)) {
+		debugger->backend->printf(debugger->backend, "Profiling is not supported on this platform.\n");
+		return NULL;
+	}
+	struct mDebuggerProfiler* profiler = malloc(sizeof(*profiler));
+	mDebuggerProfilerInit(profiler);
+	mDebuggerAttachModule(debugger->d.p, &profiler->d);
+	debugger->profiler = profiler;
+	if (mDebuggerProfilerAutoloadSymbols(profiler)) {
+		debugger->backend->printf(debugger->backend, "Loaded %" PRIz "u function symbols from %s\n", profiler->profile.symbolCount, profiler->profile.symbolSource);
+	} else {
+		debugger->backend->printf(debugger->backend, "No symbols found next to the ROM; use \"profile symbols FILE\" to load an ELF.\n");
+	}
+	return profiler;
+}
+
+static void _destroyProfiler(struct CLIDebugger* debugger) {
+	struct mDebuggerProfiler* profiler = debugger->profiler;
+	if (!profiler) {
+		return;
+	}
+	if (profiler->recording) {
+		profiler->recording = false;
+		mDebuggerModuleClearNeedsCallback(&profiler->d);
+	}
+	mDebuggerDetachModule(debugger->d.p, &profiler->d);
+	mDebuggerProfilerDeinit(profiler);
+	free(profiler);
+	debugger->profiler = NULL;
+}
+
+static void _profileStatus(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler) {
+	struct mProfile* profile = &profiler->profile;
+	if (!profile->finished) {
+		mProfileFinish(profile);
+	}
+	debugger->backend->printf(debugger->backend, "Profiler: %s\n", profiler->recording ? "recording" : "stopped");
+	if (profile->symbolSource) {
+		debugger->backend->printf(debugger->backend, "Symbols: %" PRIz "u functions from %s\n", profile->symbolCount, profile->symbolSource);
+	} else {
+		debugger->backend->printf(debugger->backend, "Symbols: none\n");
+	}
+	if (profiler->recording) {
+		debugger->backend->printf(debugger->backend, "Cycles recorded so far: %" PRIu64 "\n", profile->totalCycles);
+		return;
+	}
+	debugger->backend->printf(debugger->backend, "Cycles: %" PRIu64 " recorded, %" PRIu64 " elapsed%s\n",
+	                          profile->totalCycles, profile->elapsedCycles,
+	                          profile->totalCycles == profile->elapsedCycles ? "" : " (mismatch)");
+	debugger->backend->printf(debugger->backend, "Frames: %u\n", profile->frames);
+	if (profile->idleOptimization && strcmp(profile->idleOptimization, "ignore") != 0) {
+		debugger->backend->printf(debugger->backend, "Note: idle-loop optimization is \"%s\", so busy-wait loops are not counted as code.\n", profile->idleOptimization);
+	}
+}
+
+static void _profileTop(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler, struct CLIDebugVector* dv) {
+	size_t count = 20;
+	if (dv) {
+		char* end;
+		unsigned long requested = strtoul(dv->charValue, &end, 10);
+		if (*end || !requested) {
+			debugger->backend->printf(debugger->backend, "%s\n", ERROR_INVALID_ARGS);
+			return;
+		}
+		count = requested;
+	}
+	struct mProfile* profile = &profiler->profile;
+	mProfileFinish(profile);
+	if (!profile->totalCycles) {
+		debugger->backend->printf(debugger->backend, "No profile data.\n");
+		return;
+	}
+	size_t* indices = malloc(sizeof(*indices) * count);
+	count = mProfileTopFunctions(profile, indices, count);
+	debugger->backend->printf(debugger->backend, "  Self %%     Self cycles       Executions  Function\n");
+	size_t i;
+	for (i = 0; i < count; ++i) {
+		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, indices[i]);
+		debugger->backend->printf(debugger->backend, "%7.2f%% %15" PRIu64 " %16" PRIu64 "  %s\n",
+		                          function->selfCycles * 100.0 / profile->totalCycles,
+		                          function->selfCycles, function->executions, function->name);
+	}
+	free(indices);
+}
+
+#ifdef ENABLE_VFS
+static void _profileFile(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler, const char* action, struct CLIDebugVector* dv) {
+	if (!dv) {
+		debugger->backend->printf(debugger->backend, "%s\n", ERROR_MISSING_ARGS);
+		return;
+	}
+	if (strcmp(action, "symbols") == 0) {
+		struct VFile* vf = VFileOpen(dv->charValue, O_RDONLY);
+		if (!vf) {
+			debugger->backend->printf(debugger->backend, "Could not open %s\n", dv->charValue);
+			return;
+		}
+		if (mDebuggerProfilerLoadSymbols(profiler, vf, dv->charValue)) {
+			debugger->backend->printf(debugger->backend, "Loaded %" PRIz "u function symbols\n", profiler->profile.symbolCount);
+		} else {
+			debugger->backend->printf(debugger->backend, "Not a 32-bit ELF file with a symbol table\n");
+		}
+		vf->close(vf);
+		return;
+	}
+
+	if (!profiler->profile.finished) {
+		mProfileFinish(&profiler->profile);
+	}
+	struct VFile* vf = VFileOpen(dv->charValue, O_WRONLY | O_CREAT | O_TRUNC);
+	if (!vf) {
+		debugger->backend->printf(debugger->backend, "Could not open %s for writing\n", dv->charValue);
+		return;
+	}
+	bool success;
+	if (strcmp(action, "save") == 0) {
+		success = mProfileSave(&profiler->profile, vf);
+	} else {
+		success = mProfileExportCallgrind(&profiler->profile, vf);
+	}
+	vf->close(vf);
+	debugger->backend->printf(debugger->backend, success ? "Wrote %s\n" : "Failed to write %s\n", dv->charValue);
+}
+#endif
+
+static void _profile(struct CLIDebugger* debugger, struct CLIDebugVector* dv) {
+	if (dv && dv->type != CLIDV_CHAR_TYPE) {
+		debugger->backend->printf(debugger->backend, "%s\n", ERROR_INVALID_ARGS);
+		return;
+	}
+	const char* action = dv ? dv->charValue : "status";
+	struct CLIDebugVector* argument = dv ? dv->next : NULL;
+	if (argument && argument->type != CLIDV_CHAR_TYPE) {
+		debugger->backend->printf(debugger->backend, "%s\n", ERROR_INVALID_ARGS);
+		return;
+	}
+	if (strcmp(action, "status") != 0 && strcmp(action, "start") != 0 && strcmp(action, "stop") != 0 &&
+	    strcmp(action, "reset") != 0 && strcmp(action, "top") != 0
+#ifdef ENABLE_VFS
+	    && strcmp(action, "symbols") != 0 && strcmp(action, "save") != 0 && strcmp(action, "export") != 0
+#endif
+	    ) {
+		debugger->backend->printf(debugger->backend, "Unknown profile command \"%s\"\n", action);
+		return;
+	}
+
+	struct mDebuggerProfiler* profiler = _ensureProfiler(debugger);
+	if (!profiler) {
+		return;
+	}
+	if (strcmp(action, "status") == 0) {
+		_profileStatus(debugger, profiler);
+	} else if (strcmp(action, "start") == 0) {
+		if (profiler->recording) {
+			debugger->backend->printf(debugger->backend, "Already recording.\n");
+		} else if (mDebuggerProfilerStart(profiler)) {
+			debugger->backend->printf(debugger->backend, "Recording; continue execution to profile.\n");
+		} else {
+			debugger->backend->printf(debugger->backend, "Could not start the profiler.\n");
+		}
+	} else if (strcmp(action, "stop") == 0) {
+		mDebuggerProfilerStop(profiler);
+		_profileStatus(debugger, profiler);
+	} else if (strcmp(action, "reset") == 0) {
+		mDebuggerProfilerReset(profiler);
+		debugger->backend->printf(debugger->backend, "Profile data cleared.\n");
+	} else if (strcmp(action, "top") == 0) {
+		_profileTop(debugger, profiler, argument);
+#ifdef ENABLE_VFS
+	} else {
+		_profileFile(debugger, profiler, action, argument);
+#endif
 	}
 }
