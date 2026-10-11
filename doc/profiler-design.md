@@ -1,6 +1,6 @@
 # GBA Profiler: Design
 
-Status: accepted, objectives set 2026-10-10. Milestone 1 implemented 2026-10-10, milestone 2 on 2026-10-11.
+Status: accepted, objectives set 2026-10-10. Milestone 1 implemented 2026-10-10, milestones 2 and 3 on 2026-10-11.
 Branch: `profiler`, based on upstream `master` at `143adf5aa`.
 
 This is an independent fork. It is developed without coordination with upstream, but structured so that upstream could merge it unchanged if they ever chose to (see "Keeping the fork adoptable").
@@ -124,8 +124,10 @@ snap = registerSnapshot()
 now = mTimingGlobalTime(timing)
 delta = now - lastTime; lastTime = now
 
-if counters.blockedCycles != lastBlocked or counters.hleSwiCount != lastSwi:
-	split delta into DMA, halt and SWI parts (§6), push those events, subtract them from delta
+if counters.updates != lastCounters.updates:   // §6: one compare per step
+	split delta into DMA, halt and SWI parts, subtract them from delta
+	charge the rest as below, flush it as a CYCLES event, then push DMA, HALT and SWI events
+	if a frame ended, record it (frames, below)
 
 instruction counters for lastPC:  cycles += delta; executions += 1   (§4: two loads and two adds)
 segmentCycles += delta
@@ -144,18 +146,20 @@ Most instructions run in sequence, so a BRANCH event goes out for roughly one in
 | Type | Sent when | Payload |
 |---|---|---|
 | `BRANCH` | the PC isn't the next sequential instruction | from, to, SP, LR, status |
-| `DMA` | DMA ran during the step | channel, trigger timing, cycles |
-| `HALT` | the CPU was halted during the step | cycles |
-| `SWI` | the HLE BIOS handled an SWI during the step | SWI number, cycles |
-| `FRAME` | a frame ended (`videoFrameEnded` core callback) | global time |
-| `START` / `STOP` | recording started or stopped | global time, initial registers |
+| `CYCLES` | code cycles need charging without a branch: before a DMA, HALT or SWI event, or after a very long run without branches | — |
+| `DMA` | the CPU was blocked by DMA during the step | channel and trigger |
+| `HALT` | the CPU was halted during the step | — |
+| `SWI` | the HLE BIOS handled an SWI in C during the step | SWI number |
+| `START` | recording started, or emulated time went backwards (reset, state load) | initial registers |
 
-Every event also carries `cycles`: the code cycles since the previous event. The consumer charges them to the current node before applying the event. Together with the DMA, halt and SWI amounts, this accounts for every emulated cycle (objective 2).
+Every event carries `cycles`. For `BRANCH`, `CYCLES` and `START` they're the code cycles since the previous event, and the consumer charges them to the current node before applying the event. For `DMA`, `HALT` and `SWI` they're the time that thing took, charged to a node of its own (§6). Between them, this accounts for every emulated cycle (objective 2).
+
+**Frames** don't go through the queue. The producer sees each frame end through the core's counters (§6) and appends `{cycles, idle cycles}` to the profile's frame list itself, which is producer-owned like the per-instruction counters. The step in which a frame ends counts towards the frame that ended, which is exactly right for the usual case of a game halted until VBlank. The partial frames at the start and end of a recording, and around a reset, are left out.
 
 **Queue.** A `RingFIFO` (`mgba-util/ring-fifo.h`), the lock-free single-producer/single-consumer ring that the video proxy already uses between threads. The default capacity is 4 MB, about 130,000 events, which absorbs bursts.
 
 - **Backpressure, never dropping.** If the ring is full, the producer waits on a condition variable until the consumer frees space. A lost event would corrupt the call-stack reconstruction for the rest of the session, so exactness wins over speed here.
-- **Consumer thread.** Created on start with `mgba-util/threading.h`, and woken when the ring passes a threshold rather than on every event. On stop, the producer pushes `STOP`, the consumer drains the ring and exits, and the module joins it.
+- **Consumer thread.** Created on start with `mgba-util/threading.h`. It applies events in batches of 4,096 and polls every 5 ms rather than being woken for each event. On stop, the module tells it to finish, it drains the ring and exits, and the module joins it.
 - **Builds without threads** (`DISABLE_THREADING`): the producer calls the same consumer function itself whenever the ring is half full, and on stop. That's slower than a thread, but it's still batched and keeps the same results.
 - **Live view.** The consumer applies each batch under a mutex. A frontend that wants a live snapshot takes the same mutex briefly and copies what it needs, such as the top functions by self cycles from the tree.
 
@@ -246,27 +250,45 @@ Finding the ancestor doesn't search the stack. Each context keeps an array, inde
 
 ### 6. DMA, halt and BIOS
 
-Within one step's `delta` the producer needs to know how much was DMA (and of which kind), how much was halt, and whether the HLE BIOS ran an SWI. None of this is observable from outside the GBA core today, so it needs a small core addition (decision D2):
+Within one step's `delta` the producer needs to know how much was DMA (and of which kind), how much was halt, and whether the HLE BIOS handled an SWI in C. None of this is observable from outside the GBA core, so it needs a small core addition (decision D2). The struct is generic, in `mgba/debugger/debugger.h`, so another core could fill it in later:
 
 ```c
-struct GBAProfileCounters {        // in struct GBA, updated only when enabled
-	bool enabled;
-	uint64_t blockedCycles;        // DMA + halt total: the only value checked every step
-	uint64_t dmaCycles[4][4];      // per channel, per GBADMATiming
+struct mDebuggerCycleCounters {
+	uint32_t updates;                    // incremented on any change: the only value checked every step
+	uint32_t frames;
 	uint64_t haltCycles;
-	uint32_t hleSwiCount;          // SWIs handled by the HLE BIOS
-	uint8_t lastHleSwi;            // number of the most recent one
+	uint64_t dmaCycles[4][4];            // per channel, per trigger (immediate, HBlank, VBlank, special)
+	uint32_t swiCount;                   // SWIs the emulator handled without running BIOS code
+	uint32_t lastSwi;
+	uint64_t swiCycles;
+};
+
+struct mDebugger {
+	...
+	struct mDebuggerCycleCounters* cycleCounters;   // NULL unless a module wants them
 };
 ```
 
-They're updated in `GBADMAService`, `GBAProcessEvents` and the HLE SWI handler, behind a single `enabled` check. The producer compares `blockedCycles` and `hleSwiCount` with their previous values each step, which is two loads. Only when one has changed does it read the details and push `DMA`, `HALT` or `SWI` events. The consumer charges them:
+The profiler points `mDebugger.cycleCounters` at its own struct while recording. The GBA core finds it through its attached debugger, so nothing is counted, and nothing extra runs, when no profiler is recording. Time only passes without instructions running at three places in `GBAProcessEvents`, and those are the only places that count:
+
+- the loop that keeps ticking while `cpuBlocked` is set: each skip to the next event is DMA time, charged to `activeDMA` and its trigger;
+- `cpu->cycles = nextEvent` while halted: halt time;
+- the same jump on the way out if the CPU is still blocked: DMA time.
+
+Frame ends are counted in `GBAFrameEnded`, and SWIs at the end of the HLE SWI handler, only for calls it handled entirely in C. Calls it hands to BIOS code (`Halt`, `IntrWait`, `CpuSet` and others, and any call that stalls) are seen as branches into `[BIOS]` instead.
+
+The producer compares `updates` with its previous value each step, which is one load. Only when it has changed does it compare the rest and push `DMA`, `HALT` or `SWI` events. The consumer charges them:
 
 - **Immediate DMA** (`GBA_DMA_TIMING_NOW`): charged to the code that started it, as a child pseudo-function `[DMA n]` of the current node. It counts in the caller's inclusive time but stays visible as a separate item.
-- **HBlank/VBlank/sound FIFO/video-capture DMA**: not caused by the interrupted code. Charged to top-level `[DMA HBlank]`, `[DMA VBlank]` or `[DMA FIFO]` roots.
+- **HBlank/VBlank/sound FIFO/video-capture DMA**: not caused by the interrupted code. Charged to top-level `[DMA HBlank]`, `[DMA VBlank]`, `[DMA sound FIFO]` or `[DMA video capture]` roots.
 - **Halt** (`Halt`, `IntrWait`, `VBlankIntrWait`, and the idle-loop optimisation): charged to a top-level `[Idle]` root, so "frame budget used" is `total - idle`.
-- **HLE BIOS SWI**: the SWI runs as C code inside one step, so it shows as a child `[SWI 0x0B CpuSet]` (the name comes from the SWI number) of the current node.
+- **HLE BIOS SWI**: the SWI runs as C code inside one step, so it shows as a child `[SWI 0x0F ObjAffineSet]` (the name comes from the SWI number) of the current node. With libgba that node sits under the `ObjAffineSet` stub that made the call.
+
+These pseudo-functions have no per-instruction counters. Their self cycles in the flat list come from their tree nodes instead, and the profile's total is the counters plus these, which equals the elapsed time.
 
 With a real BIOS, an SWI is an exception into BIOS code at `0x08`. It appears as a branch event in Supervisor mode, and the BIOS code falls into `[BIOS]` unless BIOS symbols are supplied.
+
+On GBADoom's title screen with sound playing, the sound FIFO DMA comes to 14 transfers and about 400 cycles per frame. The game waits by polling a timer from a function call, which mGBA's idle-loop detection doesn't recognise, so with or without it every frame is fully busy.
 
 Idle-loop optimisation (the `idleOptimization` setting) skips busy-wait loops. That is correct emulated time, but it turns busy-waiting into halt, so a game that waits in a loop shows that time as `[Idle]` rather than as cycles in the waiting function. The profiler leaves the setting alone (decision D8). It records it in the profile's metadata, and the Qt view shows a notice when it isn't `ignore`.
 
@@ -275,21 +297,22 @@ Idle-loop optimisation (the `idleOptimization` setting) skips busy-wait loops. T
 The consumer side is an API that knows nothing about the emulator, so it can be unit-tested with synthetic event streams:
 
 ```c
-struct mProfileEvent {
-	uint8_t type;       // BRANCH, DMA, HALT, SWI, FRAME, START, STOP
-	uint8_t arg;        // DMA channel and timing, or SWI number
-	uint32_t cycles;    // code cycles since the previous event
+struct mProfileEvent {          // 32 bytes
+	uint8_t type;               // BRANCH, CYCLES, START, DMA, HALT, SWI
+	uint8_t width;              // BRANCH: width of the instruction that jumped
+	uint16_t arg;               // DMA: channel and trigger; SWI: number
+	uint32_t cycles;            // see §2
+	uint32_t instructions;
 	uint32_t from, to, sp, lr, status;
-	uint32_t amount;    // DMA / halt / SWI cycles
 };
 
-void mProfileConsume(struct mProfile*, const struct mProfileEvent*, size_t count);
+void mProfileRecorderConsume(struct mProfileRecorder*, const struct mProfileEvent*);
 void mProfileFinish(struct mProfile*);  // derive inclusive cycles and the flat list
 ```
 
 What a profile holds:
 
-- **Functions**: a table of symbols and pseudo-functions (`[IRQ]`, `[Idle]`, `[DMA n]`, `[BIOS]`, `[unknown …]`, `[SWI …]`).
+- **Functions**: a table of symbols and pseudo-functions (`[IRQ]`, `[Idle]`, `[DMA n]`, `[BIOS]`, `[unknown …]`, `[SWI …]`). Pseudo-functions follow the symbols in a fixed order, and new kinds only go at the end, so a saved profile's function IDs stay valid.
 - **Per-instruction counters** (recorded by the producer): the page tables from §4.
 - **Call tree** (recorded by the consumer): nodes `{function, parent, children (Table by function id), calls, recursiveCalls, selfCycles}`. Each distinct call path gets its own node, so the same function called from two places appears twice with separate counts and cycles. Recursion is folded (§5), so a function appears at most once on any path.
 - **Recursion edges** (recorded by the consumer): a small table of `(caller function, callee function) → count` for folded entries. A folded entry doesn't create a tree edge, so this table keeps "who recursed into whom" for the flat list. It's only touched on recursive entries.
@@ -299,7 +322,7 @@ What a profile holds:
   - *callers* and *callees*: for each caller→callee function pair, the calls and the callee's inclusive cycles summed over all tree edges between them, plus recursive calls from the recursion-edge table.
 
   Every figure is also shown as a percentage of total recorded cycles.
-- **Frames** (recorded by the consumer from `FRAME` events): a growable array with each frame's busy cycles (total minus idle) and total cycles. That's enough for the average, worst and percentage-of-budget figures (objective 4); at 8 bytes per frame, an hour of recording is under 2 MB. Partial frames at the start and end of a recording are excluded from the figures.
+- **Frames** (recorded by the producer, §2): a growable array with each complete frame's total and idle cycles. That's enough for the average, worst and percentage-of-budget figures (objective 4); at 8 bytes per frame, an hour of recording is under 2 MB. Percentages are of each frame's own length, which is 280,896 cycles on the GBA, so nothing GBA-specific is hard-coded.
 - **Metadata**: ROM title and CRC, ELF path, frames recorded, total cycles, BIOS type, idle-loop setting, mGBA version.
 
 Recording can start and stop at any time, or "reset and start" from boot, or "start at symbol" (for example `main`, as the prototype did). Starting mid-run, the consumer seeds the shadow stack with a single frame for the function at the current PC, since the calls that led there weren't seen.
@@ -360,7 +383,7 @@ Kept deliberately small, each in its own commit:
 
 1. `enum mDebuggerType`: add `DEBUGGER_PROFILER`. Update `supportsDebuggerType` for the GBA core.
 2. `mDebuggerPlatform`: the `registerSnapshot` accessor, implemented for ARM (D1).
-3. GBA core: `GBAProfileCounters` and the updates in `dma.c`, `gba.c` and the HLE BIOS (§6), compiled under `ENABLE_DEBUGGERS` (D2).
+3. `mDebuggerCycleCounters` and `mDebugger.cycleCounters`, and the GBA core's updates to them in `gba.c` and the HLE BIOS (§6), compiled under `ENABLE_DEBUGGERS` (D2).
 4. CLI debugger: the `profile` command set.
 
 Using the profiler also turned up some bugs in shared code. Each fix is small and useful without the profiler:
@@ -401,7 +424,7 @@ Target (objective 6): 50% of full speed or better for GBADoom on the author's ma
 
 The step-per-instruction loop costs about 3.5×, and the producer's own work about 13% on top, leaving roughly six times the target. GBADoom ran about 116,000 instructions per frame, with one branch event per 18.3 instructions, so the event stream is about 380,000 events (12 MB) per emulated second. The consumer thread's load and the Qt frontend's rendering aren't included, and debug builds will be slower, but there's plenty of headroom.
 
-**Measured with the call tree (milestone 2, 2026-10-11).** GBADoom (shareware), 1,800 frames, with the full producer, the event ring and the consumer thread building the call tree: 238% of full speed. The tree's cycles, the per-instruction counters and the elapsed time agree exactly.
+**Measured with the call tree (milestone 2, 2026-10-11).** GBADoom (shareware), 1,800 frames, with the full producer, the event ring and the consumer thread building the call tree: 238% of full speed. The tree's cycles, the per-instruction counters and the elapsed time agree exactly. With DMA, idle and frame accounting added (milestone 3) it measured 248%, within run-to-run variation, since the extra per-step work is one compare.
 
 If later measurements miss the target, the fixes in order of increasing invasiveness are:
 
@@ -411,7 +434,7 @@ If later measurements miss the target, the fixes in order of increasing invasive
 
 ## Testing
 
-- **Consumer unit tests** (cmocka, `BUILD_SUITE`): feed synthetic event streams into `mProfileConsume`.
+- **Consumer unit tests** (cmocka, `BUILD_SUITE`): feed synthetic event streams into `mProfileRecorderConsume`.
   - Calls by the LR rule (`BL`, `MOV LR, PC; BX`), returns by return-address match (`BX LR`, `POP {pc}`, `LDM`), SP-based unwinding, tail calls and branches into other functions.
   - Interrupt entry and exit, nested interrupts, and context separation.
   - Recursion folding: direct recursion several hundred levels deep stays one node; mutual recursion A → B → A folds to A → B; recursive calls are counted separately; returning out of folded calls restores the right node.
@@ -420,7 +443,7 @@ If later measurements miss the target, the fixes in order of increasing invasive
   - `.mprof` files round-trip exactly (save, load, compare equal), and the callgrind export's totals match the profile's.
 - **Pipeline tests**: the same event stream through the threaded path with a deliberately tiny ring (forcing backpressure), and through a single-threaded drain, gives identical profiles. Also: per-function self cycles from the instruction counters equal those from the tree.
 - **Test ROM**: a small devkitARM program with known cycle costs: fixed loops, nested calls, a timer IRQ (plain and nested), immediate and HBlank DMA, `VBlankIntrWait`, and a long-call veneer. Its source and a prebuilt binary are committed, so running the tests doesn't need devkitARM. A cmocka test loads it into a GBA core in-process, attaches the profiler, runs a fixed number of frames, and checks the profile against the expected buckets to within a tolerance (objectives 2 and 3).
-  - The milestone 2 version (`src/debugger/test/profile-rom/`) covers the call tree and interrupts: leaf calls, direct and mutual recursion, a function-pointer call, a tail call, ARM code in IWRAM called through a veneer, and HBlank interrupts nested inside a slow timer interrupt. The test checks exact call counts and tree shape, that recursion is reported only where the code really recurses, and that handlers appear only under `[IRQ]`. DMA, halt and SWI cases follow with milestone 3. Three things the ROM has to work around: GCC turns repeated calls to a pure function into one call unless the function has a side effect; Thumb GCC rarely emits a real tail call, so that one is written in ARM assembly; and libgba's interrupt dispatcher runs handlers with `IME` cleared, so the timer handler sets it again to allow nesting. `make` in that directory rebuilds the ROM and the `profile-rom.h` header the test embeds.
+  - The milestone 2 version (`src/debugger/test/profile-rom/`) covers the call tree and interrupts: leaf calls, direct and mutual recursion, a function-pointer call, a tail call, ARM code in IWRAM called through a veneer, and HBlank interrupts nested inside a slow timer interrupt. The test checks exact call counts and tree shape, that recursion is reported only where the code really recurses, and that handlers appear only under `[IRQ]`. Milestone 3 added three immediate DMA copies (under the function that started them), three `ObjAffineSet` calls (an SWI mGBA handles in C), an HBlank DMA during the interrupt phase, and `VBlankIntrWait` halts. Every complete frame is checked to be 280,896 cycles, give or take 64, and to include idle time once the start-up code (which clears memory for the first few frames) has finished. Three things the ROM has to work around: GCC turns repeated calls to a pure function into one call unless the function has a side effect; Thumb GCC rarely emits a real tail call, so that one is written in ARM assembly; and libgba's interrupt dispatcher runs handlers with `IME` cleared, so the timer handler sets it again to allow nesting. `make` in that directory rebuilds the ROM and the `profile-rom.h` header the test embeds.
 - **Names**: clone-suffix splitting (C and C++ names, each suffix kind, names without a suffix) and short-name derivation, both of which are the profiler's own code. For the demangler, a list of mangled names taken from a real C++ project (for example a Butano build) checks only that each one demangles to something that isn't the mangled input, or falls back cleanly, without crashing. The test doesn't compare against `c++filt`'s exact text. The test ROM includes one C++ translation unit and one function GCC clones, so the end-to-end test sees both.
 - **Regression against the prototype**: profile the same build of a real project (for example GBADoom) with both and compare the top functions. Differences should be explainable by the IRQ/DMA fixes.
 
@@ -428,7 +451,7 @@ If later measurements miss the target, the fixes in order of increasing invasive
 
 1. **Flat profile.** Speed measurement first. Then the module, `registerSnapshot`, the producer with per-instruction counters, symbols (with veneer folding), per-function self cycles summed from the counters, `.mprof` save/load and callgrind export of that data, the CLI debugger `profile` command (`start`/`stop`/`reset`/`symbols`/`save`/`export`/`top`), and unit tests. No events or threads yet.
 2. **Event pipeline, call tree and IRQ context.** Branch events, the ring and the consumer thread (and the no-threads fallback), call/return/interrupt reconstruction, the call tree with call counting and recursion folding, the derived flat list (inclusive cycles, callers, callees), `profile tree` and `profile func`, the consumer and pipeline tests, the test ROM and its in-process test, and checking that the CLI debugger still works while profiling.
-3. **DMA, idle and frames.** GBA core counters, DMA/HALT/SWI/FRAME events, DMA and idle buckets, SWI pseudo-functions, frame-budget figures.
+3. **DMA, idle and frames.** GBA core counters, DMA/HALT/SWI events, DMA and idle buckets, SWI pseudo-functions, frame-budget figures (`profile frames`, and in the status and callgrind export).
 4. **Qt UI.** Controller and live view, call tree and flat list views with cross-navigation, callers/callees, per-instruction disassembly, frame-budget summary, save/open/export, compare, the vendored demangler with short/full names, and the demangling tests.
 
 Each milestone is a self-contained step that leaves the branch building and working. Version 1 is complete when all the objectives above hold.
