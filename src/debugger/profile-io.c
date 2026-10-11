@@ -386,21 +386,29 @@ bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 	return true;
 }
 
+struct mProfileExportName {
+	char buffer[1024];
+};
+
 struct mProfileCallgrindState {
 	const struct mProfile* profile;
 	struct VFile* vf;
 	uint32_t lastFunction;
+	struct mProfileExportName name;
 };
 
-static const char* _name(const struct mProfile* profile, uint32_t function) {
-	return mProfileFunctionListGetConstPointer(&profile->functions, function)->name;
+// Display names, so they're readable when a demangler is set: callgrind viewers don't demangle
+// names themselves
+static const char* _name(const struct mProfile* profile, uint32_t function, struct mProfileExportName* name) {
+	mProfileDisplayName(profile, function, name->buffer, sizeof(name->buffer));
+	return name->buffer;
 }
 
 static bool _exportCounter(uint32_t address, const struct mProfileCounter* counter, void* user) {
 	struct mProfileCallgrindState* state = user;
 	uint32_t function = mProfileFunctionAt(state->profile, address);
 	if (function != state->lastFunction) {
-		if (!_writef(state->vf, "fn=%s\n", _name(state->profile, function))) {
+		if (!_writef(state->vf, "fn=%s\n", _name(state->profile, function, &state->name))) {
 			return false;
 		}
 		state->lastFunction = function;
@@ -448,8 +456,9 @@ bool mProfileExportCallgrind(const struct mProfile* profile, struct VFile* vf) {
 	if (!_visitCounters(profile, _exportCounter, &state)) {
 		return false;
 	}
+	struct mProfileExportName* name = &state.name;
 	if (profile->other.executions) {
-		_writef(vf, "fn=%s\n", _name(profile, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_OTHER)));
+		_writef(vf, "fn=%s\n", _name(profile, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_OTHER), name));
 		_writef(vf, "0x%08X %" PRIu64 " %" PRIu64 "\n", (uint32_t) mPROFILE_REGIONS << 24, profile->other.cycles,
 		        profile->other.executions);
 	}
@@ -459,7 +468,7 @@ bool mProfileExportCallgrind(const struct mProfile* profile, struct VFile* vf) {
 	     ++i) {
 		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, i);
 		if (function->selfCycles) {
-			_writef(vf, "fn=%s\n", function->name);
+			_writef(vf, "fn=%s\n", _name(profile, i, name));
 			_writef(vf, "0x%08X %" PRIu64 " 0\n", function->start, function->selfCycles);
 		}
 	}
@@ -475,10 +484,10 @@ bool mProfileExportCallgrind(const struct mProfile* profile, struct VFile* vf) {
 		const struct mProfileFunction* from = mProfileFunctionListGetConstPointer(&profile->functions, edge->caller);
 		const struct mProfileFunction* to = mProfileFunctionListGetConstPointer(&profile->functions, edge->callee);
 		if (edge->caller != caller) {
-			_writef(vf, "fn=%s\n", from->name);
+			_writef(vf, "fn=%s\n", _name(profile, edge->caller, name));
 			caller = edge->caller;
 		}
-		_writef(vf, "cfn=%s\n", to->name);
+		_writef(vf, "cfn=%s\n", _name(profile, edge->callee, name));
 		_writef(vf, "calls=%" PRIu64 " 0x%08X\n", calls, to->start);
 		if (!_writef(vf, "0x%08X %" PRIu64 " %" PRIu64 "\n", from->start, edge->inclusiveCycles,
 		             edge->inclusiveExecutions)) {

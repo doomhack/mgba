@@ -1619,10 +1619,11 @@ static void _profileTop(struct CLIDebugger* debugger, struct mDebuggerProfiler* 
 	size_t i;
 	for (i = 0; i < count; ++i) {
 		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, indices[i]);
+		char name[512];
+		mProfileDisplayName(profile, indices[i], name, sizeof(name));
 		debugger->backend->printf(debugger->backend, "%7.2f%% %15" PRIu64 " %7.2f%% %12" PRIu64 "  %s\n",
 		                          function->selfCycles * 100.0 / profile->totalCycles, function->selfCycles,
-		                          function->inclusiveCycles * 100.0 / profile->totalCycles, function->calls,
-		                          function->name);
+		                          function->inclusiveCycles * 100.0 / profile->totalCycles, function->calls, name);
 	}
 	free(indices);
 }
@@ -1651,7 +1652,8 @@ static void _sortNodes(const struct mProfile* profile, uint32_t* nodes, size_t c
 static void _profileTreeNode(struct CLIDebugger* debugger, const struct mProfile* profile, uint32_t index,
                              unsigned depth, unsigned maxDepth) {
 	const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, index);
-	const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, node->function);
+	char name[512];
+	mProfileDisplayName(profile, node->function, name, sizeof(name));
 	char indent[2 * 32 + 1];
 	unsigned width = depth < 32 ? depth : 32;
 	memset(indent, ' ', width * 2);
@@ -1662,8 +1664,7 @@ static void _profileTreeNode(struct CLIDebugger* debugger, const struct mProfile
 	}
 	debugger->backend->printf(debugger->backend, "%7.2f%% %7.2f%% %12" PRIu64 "  %s%s%s\n",
 	                          node->subtreeCycles * 100.0 / profile->totalCycles,
-	                          node->selfCycles * 100.0 / profile->totalCycles, node->calls, indent, function->name,
-	                          recursion);
+	                          node->selfCycles * 100.0 / profile->totalCycles, node->calls, indent, name, recursion);
 	if (depth >= maxDepth) {
 		return;
 	}
@@ -1750,7 +1751,9 @@ static void _profileFunction(struct CLIDebugger* debugger, struct mDebuggerProfi
 	}
 	const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, index);
 	double total = profile->totalCycles ? (double) profile->totalCycles : 1.0;
-	debugger->backend->printf(debugger->backend, "%s\n", function->name);
+	char name[512];
+	mProfileDisplayName(profile, index, name, sizeof(name));
+	debugger->backend->printf(debugger->backend, "%s\n", name);
 	debugger->backend->printf(debugger->backend, "  Self:      %" PRIu64 " cycles (%.2f%%), %" PRIu64 " executions\n",
 	                          function->selfCycles, function->selfCycles * 100.0 / total, function->executions);
 	debugger->backend->printf(debugger->backend, "  Inclusive: %" PRIu64 " cycles (%.2f%%)\n",
@@ -1772,10 +1775,10 @@ static void _profileFunction(struct CLIDebugger* debugger, struct mDebuggerProfi
 			} else {
 				continue;
 			}
+			mProfileDisplayName(profile, other, name, sizeof(name));
 			debugger->backend->printf(debugger->backend, "    %12" PRIu64 " calls %+" PRIi64 " recursive %7.2f%%  %s\n",
 			                          edge->calls, (int64_t) edge->recursiveCalls,
-			                          edge->inclusiveCycles * 100.0 / total,
-			                          mProfileFunctionListGetConstPointer(&profile->functions, other)->name);
+			                          edge->inclusiveCycles * 100.0 / total, name);
 		}
 	}
 }
@@ -1878,7 +1881,7 @@ static void _profile(struct CLIDebugger* debugger, struct CLIDebugVector* dv) {
 		} else if (mDebuggerProfilerStart(profiler)) {
 			debugger->backend->printf(debugger->backend, "Recording; continue execution to profile.\n");
 		} else {
-			debugger->backend->printf(debugger->backend, "Could not start the profiler.\n");
+			debugger->backend->printf(debugger->backend, "Could not start the profiler. Is the Profiler window recording?\n");
 		}
 	} else if (strcmp(action, "stop") == 0) {
 		mDebuggerProfilerStop(profiler);

@@ -1201,7 +1201,73 @@ M_TEST_DEFINE(recorderStalls) {
 	_teardownProgram(&test);
 }
 
-M_TEST_SUITE_DEFINE(Profile, cmocka_unit_test(countersAndRegions), cmocka_unit_test(elfSymbols),
+// Stands in for a real demangler: knows one name
+static size_t _fakeDemangle(const char* name, size_t length, char* out, size_t size) {
+	if (length != 8 || strncmp(name, "_Z3bigii", 8) != 0) {
+		return 0;
+	}
+	return snprintf(out, size, "big(int, int)");
+}
+
+M_TEST_DEFINE(displayNames) {
+	struct mProfile profile;
+	mProfileInit(&profile);
+	mProfileBeginSymbols(&profile);
+	const char* names[] = { "_Z3bigii", "_Z3bigii.constprop.0", "plain", "plain.part.1" };
+	size_t i;
+	for (i = 0; i < 4; ++i) {
+		struct mProfileFunction* function = mProfileAppendSymbol(&profile, names[i]);
+		function->start = 0x08000000 + i * 0x10;
+		function->size = 0x10;
+	}
+	mProfileEndSymbols(&profile);
+	char name[64];
+
+	// Without a demangler, names are kept, with clone suffixes in brackets
+	mProfileDisplayName(&profile, 1, name, sizeof(name));
+	assert_string_equal(name, "_Z3bigii [constprop.0]");
+	mProfileDisplayName(&profile, 3, name, sizeof(name));
+	assert_string_equal(name, "plain [part.1]");
+
+	mProfileSetDemangler(_fakeDemangle);
+	mProfileDisplayName(&profile, 0, name, sizeof(name));
+	assert_string_equal(name, "big(int, int)");
+	mProfileDisplayName(&profile, 1, name, sizeof(name));
+	assert_string_equal(name, "big(int, int) [constprop.0]");
+	// A name the demangler doesn't know is shown as it is
+	mProfileDisplayName(&profile, 2, name, sizeof(name));
+	assert_string_equal(name, "plain");
+	mProfileDisplayName(&profile, mProfilePseudoFunction(&profile, mPROFILE_PSEUDO_IDLE), name, sizeof(name));
+	assert_string_equal(name, "[Idle]");
+
+	// The callgrind export shows display names; the native format keeps the real ones
+	mProfileAllocCounter(&profile, 0x08000010)->executions = 1;
+	mProfileFinish(&profile);
+	struct VFile* vf = VFileMemChunk(NULL, 0);
+	assert_true(mProfileExportCallgrind(&profile, vf));
+	size_t size = vf->size(vf);
+	char* text = calloc(1, size + 1);
+	vf->seek(vf, 0, SEEK_SET);
+	assert_int_equal(vf->read(vf, text, size), size);
+	vf->close(vf);
+	assert_non_null(strstr(text, "fn=big(int, int) [constprop.0]\n"));
+	free(text);
+	vf = VFileMemChunk(NULL, 0);
+	assert_true(mProfileSave(&profile, vf));
+	size = vf->size(vf);
+	text = calloc(1, size + 1);
+	vf->seek(vf, 0, SEEK_SET);
+	assert_int_equal(vf->read(vf, text, size), size);
+	vf->close(vf);
+	assert_non_null(strstr(text, " _Z3bigii.constprop.0\n"));
+	assert_null(strstr(text, "big(int"));
+	free(text);
+
+	mProfileSetDemangler(NULL);
+	mProfileDeinit(&profile);
+}
+
+M_TEST_SUITE_DEFINE(Profile,cmocka_unit_test(countersAndRegions), cmocka_unit_test(elfSymbols),
                     cmocka_unit_test(elfRejectsGarbage), cmocka_unit_test(attribution),
                     cmocka_unit_test(saveLoadRoundTrip), cmocka_unit_test(loadValidation),
                     cmocka_unit_test(callgrindExport), cmocka_unit_test(recorderCalls),
@@ -1209,4 +1275,5 @@ M_TEST_SUITE_DEFINE(Profile, cmocka_unit_test(countersAndRegions), cmocka_unit_t
                     cmocka_unit_test(recorderInterrupts), cmocka_unit_test(recorderUnwinding),
                     cmocka_unit_test(recorderTrampolineAndFallThrough), cmocka_unit_test(recorderHiddenJumps),
                     cmocka_unit_test(recorderBiosInternalCalls), cmocka_unit_test(recorderStalls),
-                    cmocka_unit_test(treeSaveLoadAndExport), PROFILE_ROM_TESTS)
+                    cmocka_unit_test(treeSaveLoadAndExport), cmocka_unit_test(displayNames),
+                    PROFILE_ROM_TESTS)

@@ -201,6 +201,16 @@ static inline uint32_t mProfilePseudoFunction(const struct mProfile* profile, en
 	return profile->symbolCount + pseudo;
 }
 
+// Turns a mangled name (not NUL-terminated) into a readable one, returning its length, or 0 if it
+// isn't a mangled name. Names are only demangled for display: a profile always stores, saves and
+// matches the names from the symbol table.
+typedef size_t (*mProfileDemangler)(const char* name, size_t length, char* out, size_t size);
+void mProfileSetDemangler(mProfileDemangler);
+
+// A function's name for display: demangled if a demangler is set, with any clone suffix after it
+// in brackets, as in "big(int, int) [constprop.0]". Returns the length it would have.
+size_t mProfileDisplayName(const struct mProfile*, uint32_t function, char* out, size_t size);
+
 uint32_t mProfileSwiFunction(const struct mProfile*, unsigned number);
 void mProfileSummarizeFrames(const struct mProfile*, struct mProfileFrameSummary*);
 

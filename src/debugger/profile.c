@@ -343,6 +343,41 @@ uint32_t mProfileFunctionAt(const struct mProfile* profile, uint32_t address) {
 	return mProfilePseudoFunction(profile, mPROFILE_PSEUDO_REGION + region);
 }
 
+static mProfileDemangler _demangler;
+
+void mProfileSetDemangler(mProfileDemangler demangler) {
+	_demangler = demangler;
+}
+
+size_t mProfileDisplayName(const struct mProfile* profile, uint32_t function, char* out, size_t size) {
+	if (function >= mProfileFunctionListSize(&profile->functions)) {
+		return snprintf(out, size, "[function %u]", function);
+	}
+	const struct mProfileFunction* entry = mProfileFunctionListGetConstPointer(&profile->functions, function);
+	if (entry->pseudo) {
+		return snprintf(out, size, "%s", entry->name);
+	}
+	size_t length = 0;
+	char demangled[1024];
+	if (_demangler) {
+		length = _demangler(entry->name, entry->baseLength, demangled, sizeof(demangled));
+		if (length >= sizeof(demangled)) {
+			length = 0;
+		}
+	}
+	if (!length) {
+		length = entry->baseLength < sizeof(demangled) ? entry->baseLength : sizeof(demangled) - 1;
+		memcpy(demangled, entry->name, length);
+	}
+	demangled[length] = '\0';
+	const char* suffix = &entry->name[entry->baseLength];
+	if (*suffix == '.') {
+		// ".constprop.0" becomes " [constprop.0]"
+		return snprintf(out, size, "%s [%s]", demangled, &suffix[1]);
+	}
+	return snprintf(out, size, "%s", demangled);
+}
+
 uint32_t mProfileSwiFunction(const struct mProfile* profile, unsigned number) {
 	if (number >= mPROFILE_SWIS) {
 		return mProfilePseudoFunction(profile, mPROFILE_PSEUDO_SWI_OTHER);

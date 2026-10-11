@@ -395,6 +395,10 @@ bool mDebuggerProfilerStart(struct mDebuggerProfiler* profiler) {
 	    !core->timing) {
 		return false;
 	}
+	if (debugger->cycleCounters && debugger->cycleCounters != &profiler->counters) {
+		// Another profiler is recording
+		return false;
+	}
 	_describeCore(profiler, core);
 	if (profiler->events.data) {
 		RingFIFOClear(&profiler->events);
