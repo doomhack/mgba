@@ -164,6 +164,35 @@ struct mDebuggerRegisterSnapshot {
 	unsigned width;
 };
 
+#define mDEBUGGER_DMA_CHANNELS 4
+
+enum mDebuggerDMATrigger {
+	mDEBUGGER_DMA_IMMEDIATE,
+	mDEBUGGER_DMA_HBLANK,
+	mDEBUGGER_DMA_VBLANK,
+	// Sound FIFO or video capture, depending on the channel
+	mDEBUGGER_DMA_SPECIAL,
+	mDEBUGGER_DMA_TRIGGERS
+};
+
+// Where emulated time went other than running instructions. A module that wants to know points
+// mDebugger.cycleCounters at one of these, and cores that support it add to it as time passes.
+// Nothing is counted while it's NULL.
+struct mDebuggerCycleCounters {
+	// Incremented whenever anything below changes, so a module only has to compare this after
+	// each step
+	uint32_t updates;
+	uint32_t frames;
+	// The CPU halted until an interrupt
+	uint64_t haltCycles;
+	// The CPU blocked by DMA, by channel and what triggered it
+	uint64_t dmaCycles[mDEBUGGER_DMA_CHANNELS][mDEBUGGER_DMA_TRIGGERS];
+	// System calls the emulator handled itself, without running BIOS code
+	uint32_t swiCount;
+	uint32_t lastSwi;
+	uint64_t swiCycles;
+};
+
 DECLARE_VECTOR(mBreakpointList, struct mBreakpoint);
 DECLARE_VECTOR(mWatchpointList, struct mWatchpoint);
 DECLARE_VECTOR(mDebuggerModuleList, struct mDebuggerModule*);
@@ -232,6 +261,7 @@ struct mDebugger {
 
 	struct mDebuggerModuleList modules;
 	struct Table pointOwner;
+	struct mDebuggerCycleCounters* cycleCounters;
 };
 
 struct mDebuggerModule {

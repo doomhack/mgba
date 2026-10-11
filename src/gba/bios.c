@@ -5,6 +5,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include <mgba/internal/gba/bios.h>
 
+#ifdef ENABLE_DEBUGGERS
+#include <mgba/debugger/debugger.h>
+#endif
 #include <mgba/internal/arm/isa-inlines.h>
 #include <mgba/internal/arm/macros.h>
 #include <mgba/internal/gba/gba.h>
@@ -424,6 +427,9 @@ void GBASwi16(struct ARMCore* cpu, int immediate) {
 		return;
 	}
 
+#ifdef ENABLE_DEBUGGERS
+	int32_t startCycles = cpu->cycles;
+#endif
 	bool useStall = false;
 	switch (immediate) {
 	case GBA_SWI_SOFT_RESET:
@@ -610,6 +616,17 @@ void GBASwi16(struct ARMCore* cpu, int immediate) {
 		}
 	}
 	gba->memory.biosPrefetch = 0xE3A02004;
+
+#ifdef ENABLE_DEBUGGERS
+	// Calls that continue in BIOS code show up there instead
+	struct mDebuggerCycleCounters* counters = GBACycleCounters(gba);
+	if (counters && !useStall) {
+		++counters->swiCount;
+		counters->lastSwi = immediate;
+		counters->swiCycles += cpu->cycles - startCycles;
+		++counters->updates;
+	}
+#endif
 }
 
 void GBASwi32(struct ARMCore* cpu, int immediate) {

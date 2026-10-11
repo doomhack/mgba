@@ -164,8 +164,11 @@ bool GBAVerifyELFEntry(struct ELF* elf, uint32_t target);
 
 #ifdef ENABLE_DEBUGGERS
 struct mDebugger;
+struct mDebuggerCycleCounters;
 void GBAAttachDebugger(struct GBA* gba, struct mDebugger* debugger);
 void GBADetachDebugger(struct GBA* gba);
+// The attached debugger's cycle counters, or NULL if nothing wants them
+struct mDebuggerCycleCounters* GBACycleCounters(struct GBA* gba);
 #endif
 
 void GBASetBreakpoint(struct GBA* gba, struct mCPUComponent* component, uint32_t address, enum ExecutionMode mode,

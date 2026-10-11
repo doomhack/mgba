@@ -324,6 +324,40 @@ void GBASkipBIOS(struct GBA* gba) {
 	}
 }
 
+#ifdef ENABLE_DEBUGGERS
+static void _countBlocked(struct GBA* gba, struct mDebuggerCycleCounters* counters, int32_t cycles) {
+	int dma = gba->memory.activeDMA;
+	if (dma < 0 || cycles <= 0) {
+		return;
+	}
+	enum mDebuggerDMATrigger trigger;
+	switch (GBADMARegisterGetTiming(gba->memory.dma[dma].reg)) {
+	case GBA_DMA_TIMING_NOW:
+		trigger = mDEBUGGER_DMA_IMMEDIATE;
+		break;
+	case GBA_DMA_TIMING_HBLANK:
+		trigger = mDEBUGGER_DMA_HBLANK;
+		break;
+	case GBA_DMA_TIMING_VBLANK:
+		trigger = mDEBUGGER_DMA_VBLANK;
+		break;
+	default:
+		trigger = mDEBUGGER_DMA_SPECIAL;
+		break;
+	}
+	counters->dmaCycles[dma][trigger] += cycles;
+	++counters->updates;
+}
+
+static void _countHalted(struct mDebuggerCycleCounters* counters, int32_t cycles) {
+	if (cycles <= 0) {
+		return;
+	}
+	counters->haltCycles += cycles;
+	++counters->updates;
+}
+#endif
+
 static void GBAProcessEvents(struct ARMCore* cpu) {
 	struct GBA* gba = (struct GBA*) cpu->master;
 
@@ -331,6 +365,10 @@ static void GBAProcessEvents(struct ARMCore* cpu) {
 	if (cpu->executionMode == MODE_THUMB) {
 		gba->bus |= cpu->prefetch[1] << 16;
 	}
+#ifdef ENABLE_DEBUGGERS
+	// Time skipped forward below is time the CPU didn't run: blocked by DMA, or halted
+	struct mDebuggerCycleCounters* counters = GBACycleCounters(gba);
+#endif
 
 	int32_t nextEvent = cpu->nextEvent;
 	while (cpu->cycles >= nextEvent) {
@@ -339,11 +377,21 @@ static void GBAProcessEvents(struct ARMCore* cpu) {
 		do {
 			int32_t cycles = cpu->cycles;
 			cpu->cycles = 0;
+#ifdef ENABLE_DEBUGGERS
+			if (UNLIKELY(counters) && cycles < nextEvent) {
+				_countBlocked(gba, counters, nextEvent - cycles);
+			}
+#endif
 			nextEvent = mTimingTick(&gba->timing, cycles < nextEvent ? nextEvent : cycles);
 		} while (gba->cpuBlocked && !gba->earlyExit);
 
 		cpu->nextEvent = nextEvent;
 		if (cpu->halted) {
+#ifdef ENABLE_DEBUGGERS
+			if (UNLIKELY(counters)) {
+				_countHalted(counters, nextEvent - cpu->cycles);
+			}
+#endif
 			cpu->cycles = nextEvent;
 			if (!gba->memory.io[GBA_REG(IME)] || !gba->memory.io[GBA_REG(IE)]) {
 				break;
@@ -355,6 +403,11 @@ static void GBAProcessEvents(struct ARMCore* cpu) {
 	}
 	gba->earlyExit = false;
 	if (gba->cpuBlocked) {
+#ifdef ENABLE_DEBUGGERS
+		if (UNLIKELY(counters)) {
+			_countBlocked(gba, counters, cpu->nextEvent - cpu->cycles);
+		}
+#endif
 		cpu->cycles = cpu->nextEvent;
 	}
 }
@@ -374,6 +427,13 @@ void GBADetachDebugger(struct GBA* gba) {
 	}
 	gba->cpu->components[CPU_COMPONENT_DEBUGGER] = NULL;
 	gba->debugger = NULL;
+}
+
+struct mDebuggerCycleCounters* GBACycleCounters(struct GBA* gba) {
+	if (!gba->debugger) {
+		return NULL;
+	}
+	return gba->debugger->d.p->cycleCounters;
 }
 #endif
 
@@ -967,6 +1027,14 @@ void GBAFrameStarted(struct GBA* gba) {
 void GBAFrameEnded(struct GBA* gba) {
 	int wasDirty = gba->memory.savedata.dirty;
 	GBASavedataClean(&gba->memory.savedata, gba->video.frameCounter);
+
+#ifdef ENABLE_DEBUGGERS
+	struct mDebuggerCycleCounters* counters = GBACycleCounters(gba);
+	if (counters) {
+		++counters->frames;
+		++counters->updates;
+	}
+#endif
 
 	if (gba->cpu->components && gba->cpu->components[CPU_COMPONENT_CHEAT_DEVICE]) {
 		struct mCheatDevice* device = (struct mCheatDevice*) gba->cpu->components[CPU_COMPONENT_CHEAT_DEVICE];
