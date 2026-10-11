@@ -424,7 +424,12 @@ static void _stall(struct mProfileRecorder* recorder, const struct mProfileEvent
 		node = mProfileGetChild(profile, current, mProfileSwiFunction(profile, event->arg));
 	}
 	struct mProfileNode* entry = _node(recorder, node);
-	++entry->calls;
+	if (event->type == mPROFILE_EVENT_DMA) {
+		// Several transfers can happen in one step, such as HBlank DMA while the CPU is halted
+		entry->calls += event->instructions;
+	} else {
+		++entry->calls;
+	}
 	entry->selfCycles += event->cycles;
 }
 

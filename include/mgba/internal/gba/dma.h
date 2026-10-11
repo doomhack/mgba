@@ -70,6 +70,11 @@ void GBADMARunDisplayStart(struct GBA* gba, int32_t cycles);
 void GBADMAUpdate(struct GBA* gba);
 void GBADMARecalculateCycles(struct GBA* gba);
 
+#ifdef ENABLE_DEBUGGERS
+// What started a DMA, as an mDebuggerDMATrigger
+int GBADMADebuggerTrigger(const struct GBADMA* dma);
+#endif
+
 struct GBASerializedState;
 void GBADMASerialize(const struct GBA* gba, struct GBASerializedState* state);
 void GBADMADeserialize(struct GBA* gba, const struct GBASerializedState* state);

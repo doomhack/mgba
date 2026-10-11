@@ -330,22 +330,7 @@ static void _countBlocked(struct GBA* gba, struct mDebuggerCycleCounters* counte
 	if (dma < 0 || cycles <= 0) {
 		return;
 	}
-	enum mDebuggerDMATrigger trigger;
-	switch (GBADMARegisterGetTiming(gba->memory.dma[dma].reg)) {
-	case GBA_DMA_TIMING_NOW:
-		trigger = mDEBUGGER_DMA_IMMEDIATE;
-		break;
-	case GBA_DMA_TIMING_HBLANK:
-		trigger = mDEBUGGER_DMA_HBLANK;
-		break;
-	case GBA_DMA_TIMING_VBLANK:
-		trigger = mDEBUGGER_DMA_VBLANK;
-		break;
-	default:
-		trigger = mDEBUGGER_DMA_SPECIAL;
-		break;
-	}
-	counters->dmaCycles[dma][trigger] += cycles;
+	counters->dmaCycles[dma][GBADMADebuggerTrigger(&gba->memory.dma[dma])] += cycles;
 	++counters->updates;
 }
 

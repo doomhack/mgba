@@ -5,6 +5,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include <mgba/internal/gba/dma.h>
 
+#ifdef ENABLE_DEBUGGERS
+#include <mgba/debugger/debugger.h>
+#endif
 #include <mgba/internal/arm/macros.h>
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/io.h>
@@ -272,6 +275,14 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
 	cpu->memory.accessSource = mACCESS_DMA;
 
 	if (info->count == info->nextCount) {
+#ifdef ENABLE_DEBUGGERS
+		// The first unit of a transfer
+		struct mDebuggerCycleCounters* counters = GBACycleCounters(gba);
+		if (counters) {
+			++counters->dmaTransfers[number][GBADMADebuggerTrigger(info)];
+			++counters->updates;
+		}
+#endif
 		if (width == 4) {
 			cycles += memory->waitstatesNonseq32[sourceRegion] + memory->waitstatesNonseq32[destRegion];
 			info->cycles = memory->waitstatesSeq32[sourceRegion] + memory->waitstatesSeq32[destRegion];
@@ -356,6 +367,21 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
 	}
 	GBADMAUpdate(gba);
 }
+
+#ifdef ENABLE_DEBUGGERS
+int GBADMADebuggerTrigger(const struct GBADMA* dma) {
+	switch (GBADMARegisterGetTiming(dma->reg)) {
+	case GBA_DMA_TIMING_NOW:
+		return mDEBUGGER_DMA_IMMEDIATE;
+	case GBA_DMA_TIMING_HBLANK:
+		return mDEBUGGER_DMA_HBLANK;
+	case GBA_DMA_TIMING_VBLANK:
+		return mDEBUGGER_DMA_VBLANK;
+	default:
+		return mDEBUGGER_DMA_SPECIAL;
+	}
+}
+#endif
 
 void GBADMARecalculateCycles(struct GBA* gba) {
 	int i;

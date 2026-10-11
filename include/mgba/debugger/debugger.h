@@ -185,8 +185,10 @@ struct mDebuggerCycleCounters {
 	uint32_t frames;
 	// The CPU halted until an interrupt
 	uint64_t haltCycles;
-	// The CPU blocked by DMA, by channel and what triggered it
+	// The CPU blocked by DMA, by channel and what triggered it, and the transfers started. One
+	// step can contain several transfers, or one transfer can span steps.
 	uint64_t dmaCycles[mDEBUGGER_DMA_CHANNELS][mDEBUGGER_DMA_TRIGGERS];
+	uint32_t dmaTransfers[mDEBUGGER_DMA_CHANNELS][mDEBUGGER_DMA_TRIGGERS];
 	// System calls the emulator handled itself, without running BIOS code
 	uint32_t swiCount;
 	uint32_t lastSwi;

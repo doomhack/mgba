@@ -1088,14 +1088,20 @@ M_TEST_DEFINE(treeSaveLoadAndExport) {
 	_teardownProgram(&test);
 }
 
-static void _stall(struct RecorderTest* test, uint8_t type, uint16_t arg, uint32_t cycles) {
+static void _stallTransfers(struct RecorderTest* test, uint8_t type, uint16_t arg, uint32_t cycles, uint32_t transfers) {
 	struct mProfileEvent event;
 	memset(&event, 0, sizeof(event));
 	event.type = type;
 	event.arg = arg;
 	event.cycles = cycles;
+	event.instructions = transfers;
 	mProfileRecorderConsume(&test->recorder, &event);
 	test->charged += cycles;
+}
+
+// One DMA transfer, halt or SWI
+static void _stall(struct RecorderTest* test, uint8_t type, uint16_t arg, uint32_t cycles) {
+	_stallTransfers(test, type, arg, cycles, type == mPROFILE_EVENT_DMA ? 1 : 0);
 }
 
 M_TEST_DEFINE(recorderStalls) {
@@ -1109,6 +1115,10 @@ M_TEST_DEFINE(recorderStalls) {
 	_stall(&test, mPROFILE_EVENT_DMA, 3 | (mDEBUGGER_DMA_IMMEDIATE << 2), 40);
 	_stall(&test, mPROFILE_EVENT_SWI, 0x0F, 60);
 	_stall(&test, mPROFILE_EVENT_DMA, 0 | (mDEBUGGER_DMA_HBLANK << 2), 20);
+	// While halted, one step can hold several HBlanks' transfers; a long transfer can carry on
+	// into the next step, which starts none
+	_stallTransfers(&test, mPROFILE_EVENT_DMA, 0 | (mDEBUGGER_DMA_HBLANK << 2), 30, 3);
+	_stallTransfers(&test, mPROFILE_EVENT_DMA, 0 | (mDEBUGGER_DMA_HBLANK << 2), 5, 0);
 	_stall(&test, mPROFILE_EVENT_DMA, 1 | (mDEBUGGER_DMA_SPECIAL << 2), 8);
 	_stall(&test, mPROFILE_EVENT_DMA, 3 | (mDEBUGGER_DMA_SPECIAL << 2), 9);
 	_stall(&test, mPROFILE_EVENT_HALT, 0, 1000);
@@ -1127,7 +1137,9 @@ M_TEST_DEFINE(recorderStalls) {
 	assert_int_equal(a->subtreeCycles, 2 + 3 + 90 + 60 + 70);
 	assert_int_equal(_child(&test.profile, _index(&test.profile, a), "[SWI 0x0F ObjAffineSet]")->selfCycles, 60);
 	assert_int_equal(_child(&test.profile, _index(&test.profile, a), "[SWI]")->selfCycles, 70);
-	assert_int_equal(_child(&test.profile, mPROFILE_NONE, "[DMA HBlank]")->selfCycles, 20);
+	const struct mProfileNode* hblank = _child(&test.profile, mPROFILE_NONE, "[DMA HBlank]");
+	assert_int_equal(hblank->selfCycles, 20 + 30 + 5);
+	assert_int_equal(hblank->calls, 1 + 3);
 	assert_int_equal(_child(&test.profile, mPROFILE_NONE, "[DMA sound FIFO]")->selfCycles, 8);
 	assert_int_equal(_child(&test.profile, mPROFILE_NONE, "[DMA video capture]")->selfCycles, 9);
 	const struct mProfileNode* idle = _child(&test.profile, mPROFILE_NONE, "[Idle]");

@@ -237,7 +237,8 @@ enum mProfileEventType {
 	// Recording started or the emulator was reset: rebuild the call stack from scratch
 	mPROFILE_EVENT_START,
 	// Time the CPU didn't run code. For these, cycles are that time, charged to its own node.
-	// DMA: arg is the channel, plus the mDebuggerDMATrigger shifted left by 2
+	// DMA: arg is the channel, plus the mDebuggerDMATrigger shifted left by 2, and instructions
+	// is the number of transfers that started
 	mPROFILE_EVENT_DMA,
 	mPROFILE_EVENT_HALT,
 	// SWI: arg is the call number

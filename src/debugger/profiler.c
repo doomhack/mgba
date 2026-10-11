@@ -109,17 +109,19 @@ static void _flushSegment(struct mDebuggerProfiler* profiler) {
 	}
 }
 
-static void _emitStall(struct mDebuggerProfiler* profiler, uint8_t type, uint16_t arg, uint64_t cycles) {
+static void _emitStall(struct mDebuggerProfiler* profiler, uint8_t type, uint16_t arg, uint64_t cycles, uint32_t count) {
 	struct mProfileEvent event;
 	memset(&event, 0, sizeof(event));
 	event.type = type;
 	event.arg = arg;
+	event.instructions = count;
 	event.from = profiler->lastPC;
 	// Always at least one event, so even an SWI that took no time counts as a call
 	do {
 		event.cycles = cycles > MAX_SEGMENT_CYCLES ? MAX_SEGMENT_CYCLES : (uint32_t) cycles;
 		_push(profiler, &event);
 		cycles -= event.cycles;
+		event.instructions = 0;
 	} while (cycles);
 }
 
@@ -164,17 +166,19 @@ static bool _chargeStalls(struct mDebuggerProfiler* profiler, uint64_t delta) {
 
 	for (channel = 0; channel < mDEBUGGER_DMA_CHANNELS; ++channel) {
 		for (trigger = 0; trigger < mDEBUGGER_DMA_TRIGGERS; ++trigger) {
-			if (dma[channel][trigger]) {
-				_emitStall(profiler, mPROFILE_EVENT_DMA, channel | (trigger << 2), dma[channel][trigger]);
+			// Transfers are counted when they start, which needn't be in a step that's blocked
+			uint32_t transfers = counters->dmaTransfers[channel][trigger] - last->dmaTransfers[channel][trigger];
+			if (dma[channel][trigger] || transfers) {
+				_emitStall(profiler, mPROFILE_EVENT_DMA, channel | (trigger << 2), dma[channel][trigger], transfers);
 			}
 		}
 	}
 	if (halt) {
-		_emitStall(profiler, mPROFILE_EVENT_HALT, 0, halt);
+		_emitStall(profiler, mPROFILE_EVENT_HALT, 0, halt, 1);
 		profiler->frameIdle += halt;
 	}
 	if (swiCalled) {
-		_emitStall(profiler, mPROFILE_EVENT_SWI, counters->lastSwi, swi);
+		_emitStall(profiler, mPROFILE_EVENT_SWI, counters->lastSwi, swi, 1);
 	}
 	*last = *counters;
 	return frameEnded;
