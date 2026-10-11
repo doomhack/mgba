@@ -109,6 +109,107 @@ static void _flushSegment(struct mDebuggerProfiler* profiler) {
 	}
 }
 
+static void _emitStall(struct mDebuggerProfiler* profiler, uint8_t type, uint16_t arg, uint64_t cycles) {
+	struct mProfileEvent event;
+	memset(&event, 0, sizeof(event));
+	event.type = type;
+	event.arg = arg;
+	event.from = profiler->lastPC;
+	// Always at least one event, so even an SWI that took no time counts as a call
+	do {
+		event.cycles = cycles > MAX_SEGMENT_CYCLES ? MAX_SEGMENT_CYCLES : (uint32_t) cycles;
+		_push(profiler, &event);
+		cycles -= event.cycles;
+	} while (cycles);
+}
+
+// Take up to *budget cycles from a counter that went up from last to now
+static uint64_t _take(uint64_t now, uint64_t last, uint64_t* budget) {
+	uint64_t cycles = now - last;
+	if (cycles > *budget) {
+		// The core only counts time that passed during the step, so this shouldn't happen
+		cycles = *budget;
+	}
+	*budget -= cycles;
+	return cycles;
+}
+
+// The core counted time the CPU didn't run code during this step: split it out of the step's
+// cycles into events of its own, and charge the rest to the instruction. Returns whether a frame
+// ended.
+static bool _chargeStalls(struct mDebuggerProfiler* profiler, uint64_t delta) {
+	const struct mDebuggerCycleCounters* counters = &profiler->counters;
+	struct mDebuggerCycleCounters* last = &profiler->lastCounters;
+	uint64_t budget = delta;
+	uint64_t dma[mDEBUGGER_DMA_CHANNELS][mDEBUGGER_DMA_TRIGGERS];
+	unsigned channel;
+	unsigned trigger;
+	for (channel = 0; channel < mDEBUGGER_DMA_CHANNELS; ++channel) {
+		for (trigger = 0; trigger < mDEBUGGER_DMA_TRIGGERS; ++trigger) {
+			dma[channel][trigger] =
+			    _take(counters->dmaCycles[channel][trigger], last->dmaCycles[channel][trigger], &budget);
+		}
+	}
+	uint64_t halt = _take(counters->haltCycles, last->haltCycles, &budget);
+	uint64_t swi = _take(counters->swiCycles, last->swiCycles, &budget);
+	bool swiCalled = counters->swiCount != last->swiCount;
+	bool frameEnded = counters->frames != last->frames;
+
+	// What's left is the instruction's own time. Charge it to the current node first, since the
+	// events below are charged to nodes of their own.
+	mProfileCount(&profiler->profile, profiler->lastPC, budget);
+	profiler->segmentCycles += budget;
+	++profiler->segmentInstructions;
+	_flushSegment(profiler);
+
+	for (channel = 0; channel < mDEBUGGER_DMA_CHANNELS; ++channel) {
+		for (trigger = 0; trigger < mDEBUGGER_DMA_TRIGGERS; ++trigger) {
+			if (dma[channel][trigger]) {
+				_emitStall(profiler, mPROFILE_EVENT_DMA, channel | (trigger << 2), dma[channel][trigger]);
+			}
+		}
+	}
+	if (halt) {
+		_emitStall(profiler, mPROFILE_EVENT_HALT, 0, halt);
+		profiler->frameIdle += halt;
+	}
+	if (swiCalled) {
+		_emitStall(profiler, mPROFILE_EVENT_SWI, counters->lastSwi, swi);
+	}
+	*last = *counters;
+	return frameEnded;
+}
+
+static void _charge(struct mDebuggerProfiler* profiler, uint64_t delta, uint64_t now) {
+	if (LIKELY(profiler->counters.updates == profiler->lastCounters.updates)) {
+		mProfileCount(&profiler->profile, profiler->lastPC, delta);
+		profiler->segmentCycles += delta;
+		++profiler->segmentInstructions;
+		return;
+	}
+	if (!_chargeStalls(profiler, delta)) {
+		return;
+	}
+	// A frame ended during this step. The step counts towards the frame that ended, which is
+	// right for the usual case of a game halted waiting for VBlank.
+	if (profiler->frameStarted) {
+		uint64_t cycles = now - profiler->frameStart;
+		struct mProfileFrame* frame = mProfileFrameListAppend(&profiler->profile.frameCosts);
+		frame->cycles = cycles > UINT32_MAX ? UINT32_MAX : (uint32_t) cycles;
+		frame->idleCycles = profiler->frameIdle > frame->cycles ? frame->cycles : (uint32_t) profiler->frameIdle;
+	}
+	profiler->frameStarted = true;
+	profiler->frameStart = now;
+	profiler->frameIdle = 0;
+}
+
+// Start over from the core's counters as they are now, discarding any partial frame
+static void _resyncCounters(struct mDebuggerProfiler* profiler) {
+	profiler->lastCounters = profiler->counters;
+	profiler->frameStarted = false;
+	profiler->frameIdle = 0;
+}
+
 static void _stopConsumer(struct mDebuggerProfiler* profiler) {
 #ifndef DISABLE_THREADING
 	if (profiler->consumerRunning) {
@@ -133,6 +234,17 @@ static void _profilerEntered(struct mDebuggerModule* module, enum mDebuggerEntry
 	module->isPaused = false;
 }
 
+static void _releaseCounters(struct mDebuggerProfiler* profiler) {
+	if (profiler->d.p && profiler->d.p->cycleCounters == &profiler->counters) {
+		profiler->d.p->cycleCounters = NULL;
+	}
+}
+
+static void _profilerDetached(struct mDebuggerModule* module) {
+	// The core mustn't keep counting into a profiler that's going away
+	_releaseCounters((struct mDebuggerProfiler*) module);
+}
+
 static void _profilerCallback(struct mDebuggerModule* module) {
 	struct mDebuggerProfiler* profiler = (struct mDebuggerProfiler*) module;
 	if (!profiler->recording) {
@@ -152,6 +264,7 @@ static void _profilerCallback(struct mDebuggerModule* module) {
 			profiler->lastTime = now;
 			profiler->lastPC = snapshot.pc;
 			profiler->lastWidth = snapshot.width;
+			_resyncCounters(profiler);
 			_emit(profiler, mPROFILE_EVENT_START, &snapshot);
 		}
 		// Otherwise nothing ran since the last call, e.g. while another module holds emulation paused
@@ -159,10 +272,7 @@ static void _profilerCallback(struct mDebuggerModule* module) {
 		profiler->lastWidth = snapshot.width;
 		return;
 	}
-	uint64_t delta = now - profiler->lastTime;
-	mProfileCount(&profiler->profile, profiler->lastPC, delta);
-	profiler->segmentCycles += delta;
-	++profiler->segmentInstructions;
+	_charge(profiler, now - profiler->lastTime, now);
 	if (snapshot.pc != profiler->lastPC + profiler->lastWidth) {
 		_emit(profiler, mPROFILE_EVENT_BRANCH, &snapshot);
 	} else if (profiler->segmentCycles > MAX_SEGMENT_CYCLES) {
@@ -209,6 +319,7 @@ void mDebuggerProfilerInit(struct mDebuggerProfiler* profiler) {
 	profiler->d.type = DEBUGGER_PROFILER;
 	profiler->d.entered = _profilerEntered;
 	profiler->d.custom = _profilerCallback;
+	profiler->d.deinit = _profilerDetached;
 #ifndef DISABLE_THREADING
 	MutexInit(&profiler->dataMutex);
 	MutexInit(&profiler->signalMutex);
@@ -218,6 +329,7 @@ void mDebuggerProfilerInit(struct mDebuggerProfiler* profiler) {
 }
 
 void mDebuggerProfilerDeinit(struct mDebuggerProfiler* profiler) {
+	_releaseCounters(profiler);
 	profiler->recording = false;
 	_stopConsumer(profiler);
 	if (profiler->events.data) {
@@ -300,6 +412,8 @@ bool mDebuggerProfilerStart(struct mDebuggerProfiler* profiler) {
 	profiler->segmentInstructions = 0;
 	profiler->startFrame = core->frameCounter(core);
 	profiler->profile.finished = false;
+	debugger->cycleCounters = &profiler->counters;
+	_resyncCounters(profiler);
 	_emit(profiler, mPROFILE_EVENT_START, &snapshot);
 
 #ifndef DISABLE_THREADING
@@ -321,12 +435,11 @@ void mDebuggerProfilerStop(struct mDebuggerProfiler* profiler) {
 	uint64_t now = mTimingGlobalTime(core->timing);
 	if (now > profiler->lastTime) {
 		// Time that passed without a callback, such as a single step taken by another module
-		mProfileCount(&profiler->profile, profiler->lastPC, now - profiler->lastTime);
-		profiler->segmentCycles += now - profiler->lastTime;
-		++profiler->segmentInstructions;
+		_charge(profiler, now - profiler->lastTime, now);
 		profiler->lastTime = now;
 	}
 	_flushSegment(profiler);
+	_releaseCounters(profiler);
 	profiler->profile.elapsedCycles += profiler->lastTime - profiler->segmentStart;
 	uint32_t frame = core->frameCounter(core);
 	if (frame >= profiler->startFrame) {
@@ -391,5 +504,6 @@ void mDebuggerProfilerReset(struct mDebuggerProfiler* profiler) {
 	profiler->segmentCycles = 0;
 	profiler->segmentInstructions = 0;
 	profiler->startFrame = debugger->core->frameCounter(debugger->core);
+	_resyncCounters(profiler);
 	mDebuggerProfilerUnlock(profiler);
 }

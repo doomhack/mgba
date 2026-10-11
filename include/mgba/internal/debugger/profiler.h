@@ -29,6 +29,13 @@ struct mDebuggerProfiler {
 	uint64_t segmentCycles;
 	uint32_t segmentInstructions;
 	uint32_t startFrame;
+	// Filled in by the core while recording, and as of the last step
+	struct mDebuggerCycleCounters counters;
+	struct mDebuggerCycleCounters lastCounters;
+	// The frame in progress, once a whole one has started
+	bool frameStarted;
+	uint64_t frameStart;
+	uint64_t frameIdle;
 
 	// Events go from the emulation thread to a consumer thread that builds the call tree
 	struct RingFIFO events;

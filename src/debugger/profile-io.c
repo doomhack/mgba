@@ -134,6 +134,10 @@ bool mProfileSave(const struct mProfile* profile, struct VFile* vf) {
 		const struct mProfileEdge* edge = mProfileEdgeListGetConstPointer(&profile->recursion, i);
 		_writef(vf, "recursion %u %u %" PRIu64 "\n", edge->caller, edge->callee, edge->recursiveCalls);
 	}
+	for (i = 0; i < mProfileFrameListSize(&profile->frameCosts); ++i) {
+		const struct mProfileFrame* frame = mProfileFrameListGetConstPointer(&profile->frameCosts, i);
+		_writef(vf, "frame %u %u\n", frame->cycles, frame->idleCycles);
+	}
 	return _writef(vf, "end\n");
 }
 
@@ -235,25 +239,18 @@ static bool _applyNodes(struct mProfile* profile, const struct mProfileSavedNode
 	size_t i;
 	for (i = 0; i < mProfileSavedNodeListSize(saved); ++i) {
 		const struct mProfileSavedNode* source = mProfileSavedNodeListGetConstPointer(saved, i);
-		struct mProfileNode* node;
-		if (i <= mPROFILE_ROOT_IRQ) {
-			// The roots already exist
-			if (source->parent != -1) {
-				return false;
-			}
-			node = mProfileNodeListGetPointer(&profile->nodes, i);
-		} else {
-			if (source->parent < 0 || (size_t) source->parent >= i || source->function < 0 ||
-			    source->function >= functionCount) {
-				return false;
-			}
-			uint32_t index = mProfileGetChild(profile, source->parent, source->function);
-			if (index != i) {
-				// Two saved nodes with the same parent and function
-				return false;
-			}
-			node = mProfileNodeListGetPointer(&profile->nodes, index);
+		if (source->parent < -1 || source->parent >= (int64_t) i || source->function < 0 ||
+		    source->function >= functionCount) {
+			return false;
 		}
+		// The fixed roots already exist, so this finds them
+		uint32_t parent = source->parent < 0 ? mPROFILE_NONE : (uint32_t) source->parent;
+		uint32_t index = mProfileGetChild(profile, parent, source->function);
+		if (index != i) {
+			// Two saved nodes with the same parent and function, or the fixed roots out of place
+			return false;
+		}
+		struct mProfileNode* node = mProfileNodeListGetPointer(&profile->nodes, index);
 		node->calls = source->calls;
 		node->recursiveCalls = source->recursiveCalls;
 		node->selfCycles = source->selfCycles;
@@ -343,6 +340,11 @@ bool mProfileLoad(struct mProfile* profile, struct VFile* vf) {
 			ok = _loadCounter(profile, cursor, true);
 		} else if (_isRecord(type, typeLength, "node")) {
 			ok = _loadNode(&nodes, cursor);
+		} else if (_isRecord(type, typeLength, "frame")) {
+			struct mProfileFrame* frame = mProfileFrameListAppend(&profile->frameCosts);
+			frame->cycles = strtoul(_field(&cursor), NULL, 10);
+			frame->idleCycles = strtoul(_field(&cursor), NULL, 10);
+			ok = frame->idleCycles <= frame->cycles;
 		} else if (_isRecord(type, typeLength, "recursion")) {
 			recursion = realloc(recursion, sizeof(*recursion) * (recursionCount + 1));
 			recursion[recursionCount] = (char*) cursor;
@@ -420,6 +422,15 @@ bool mProfileExportCallgrind(const struct mProfile* profile, struct VFile* vf) {
 	}
 	_writef(vf, "desc: Elapsed cycles: %" PRIu64 "\n", profile->elapsedCycles);
 	_writef(vf, "desc: Frames: %u\n", profile->frames);
+	struct mProfileFrameSummary frames;
+	mProfileSummarizeFrames(profile, &frames);
+	if (frames.count) {
+		_writef(vf, "desc: Average frame: %" PRIu64 " of %" PRIu64 " cycles busy (%.1f%%)\n",
+		        frames.busyCycles / frames.count, frames.cycles / frames.count,
+		        frames.busyCycles * 100.0 / frames.cycles);
+		_writef(vf, "desc: Busiest frame: %u of %u cycles busy (%.1f%%)\n", frames.worstBusyCycles, frames.worstCycles,
+		        frames.worstBusyCycles * 100.0 / frames.worstCycles);
+	}
 	if (profile->idleOptimization) {
 		_writef(vf, "desc: Idle-loop optimization: %s\n", profile->idleOptimization);
 	}
@@ -442,10 +453,19 @@ bool mProfileExportCallgrind(const struct mProfile* profile, struct VFile* vf) {
 		_writef(vf, "0x%08X %" PRIu64 " %" PRIu64 "\n", (uint32_t) mPROFILE_REGIONS << 24, profile->other.cycles,
 		        profile->other.executions);
 	}
+	// DMA, idle and SWIs have no addresses of their own
+	size_t i;
+	for (i = mProfilePseudoFunction(profile, mPROFILE_PSEUDO_DMA); i < mProfileFunctionListSize(&profile->functions);
+	     ++i) {
+		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, i);
+		if (function->selfCycles) {
+			_writef(vf, "fn=%s\n", function->name);
+			_writef(vf, "0x%08X %" PRIu64 " 0\n", function->start, function->selfCycles);
+		}
+	}
 
 	// Calls, with the inclusive cost of each callee, merged over all call sites
 	uint32_t caller = mPROFILE_NONE;
-	size_t i;
 	for (i = 0; i < mProfileEdgeListSize(&profile->edges); ++i) {
 		const struct mProfileEdge* edge = mProfileEdgeListGetConstPointer(&profile->edges, i);
 		uint64_t calls = edge->calls + edge->recursiveCalls;

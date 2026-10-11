@@ -961,6 +961,20 @@ M_TEST_DEFINE(profileTestROM) {
 	assert_int_equal(tailSource->calls, 4);
 	assert_int_equal(_child(profile, _index(profile, tailSource), "tailTarget")->calls, 4);
 
+	// DMA started by code is charged to that code, and an SWI mGBA handles itself to its caller
+	const struct mProfileNode* callsDma = _child(profile, main, "callsDma");
+	const struct mProfileNode* dma = _child(profile, _index(profile, callsDma), "[DMA 3]");
+	assert_int_equal(dma->calls, 3);
+	// At least 2 cycles per word: a read and a write
+	assert_true(dma->selfCycles >= 3 * 64 * 2);
+	assert_int_equal(dma->selfExecutions, 0);
+	const struct mProfileNode* callsSwi = _child(profile, main, "callsSwi");
+	const struct mProfileNode* swiStub = _child(profile, _index(profile, callsSwi), "ObjAffineSet");
+	const struct mProfileNode* swi = _child(profile, _index(profile, swiStub), "[SWI 0x0F ObjAffineSet]");
+	assert_int_equal(swiStub->calls, 3);
+	assert_int_equal(swi->calls, 3);
+	assert_true(swi->selfCycles > 3 * 45);
+
 	// Interrupt handlers only appear under [IRQ], once per interrupt they handled
 	mProfileFinish(profile);
 	assert_int_equal(_function(profile, "timerWork")->calls, timerTicks);
@@ -969,6 +983,41 @@ M_TEST_DEFINE(profileTestROM) {
 	assert_null(_findInTree(profile, mPROFILE_ROOT_MAIN, "hblankWork"));
 	assert_non_null(_findInTree(profile, mPROFILE_ROOT_IRQ, "timerWork"));
 	assert_true(mProfileNodeListGetConstPointer(&profile->nodes, mPROFILE_ROOT_IRQ)->calls >= timerTicks + hblankTicks);
+
+	// HBlank DMA and halts have roots of their own, and appear nowhere else
+	const struct mProfileNode* hblankDma = _child(profile, mPROFILE_NONE, "[DMA HBlank]");
+	assert_true(hblankDma->calls > 0);
+	assert_true(hblankDma->selfCycles > 0);
+	assert_int_equal(hblankDma->subtreeCycles, hblankDma->selfCycles);
+	assert_int_equal(_function(profile, "[DMA HBlank]")->calls, hblankDma->calls);
+	const struct mProfileNode* idle = _child(profile, mPROFILE_NONE, "[Idle]");
+	assert_true(idle->selfCycles > 0);
+	assert_int_equal(_function(profile, "[Idle]")->selfCycles, idle->selfCycles);
+
+	// Each complete frame takes the GBA's 280,896 cycles, give or take where the step that ends it
+	// finishes. The startup code clears memory for the first few frames; after that, the CPU is
+	// halted for part of every frame.
+	assert_true(mProfileFrameListSize(&profile->frameCosts) >= 100);
+	assert_true(mProfileFrameListSize(&profile->frameCosts) < profile->frames);
+	uint64_t frameIdle = 0;
+	for (i = 0; i < mProfileFrameListSize(&profile->frameCosts); ++i) {
+		const struct mProfileFrame* frame = mProfileFrameListGetConstPointer(&profile->frameCosts, i);
+		if (frame->cycles < 280896 - 64 || frame->cycles > 280896 + 64) {
+			fail_msg("Frame %u took %u cycles", (unsigned) i, frame->cycles);
+		}
+		if (frameIdle && !frame->idleCycles) {
+			fail_msg("Frame %u has no idle time", (unsigned) i);
+		}
+		assert_true(frame->idleCycles < frame->cycles);
+		frameIdle += frame->idleCycles;
+	}
+	assert_true(frameIdle > 0);
+	assert_true(frameIdle <= idle->selfCycles);
+	struct mProfileFrameSummary summary;
+	mProfileSummarizeFrames(profile, &summary);
+	assert_int_equal(summary.count, mProfileFrameListSize(&profile->frameCosts));
+	assert_true(summary.busyCycles < summary.cycles);
+	assert_true(summary.worstBusyCycles >= summary.busyCycles / summary.count);
 
 	// Only the recursive functions have recursive calls
 	for (i = 0; i < mProfileNodeListSize(&profile->nodes); ++i) {
@@ -1039,6 +1088,119 @@ M_TEST_DEFINE(treeSaveLoadAndExport) {
 	_teardownProgram(&test);
 }
 
+static void _stall(struct RecorderTest* test, uint8_t type, uint16_t arg, uint32_t cycles) {
+	struct mProfileEvent event;
+	memset(&event, 0, sizeof(event));
+	event.type = type;
+	event.arg = arg;
+	event.cycles = cycles;
+	mProfileRecorderConsume(&test->recorder, &event);
+	test->charged += cycles;
+}
+
+M_TEST_DEFINE(recorderStalls) {
+	struct RecorderTest test;
+	_setupProgram(&test);
+	_start(&test, 0x08000100);
+	_call(&test, 1, 0x08000110, 0x08000200, SP_MAIN);
+	// a starts DMA 3 twice and makes an SWI; meanwhile HBlank DMA runs and the CPU halts
+	_stall(&test, mPROFILE_EVENT_DMA, 3 | (mDEBUGGER_DMA_IMMEDIATE << 2), 50);
+	_jump(&test, 2, 0x08000210, 0x08000204, SP_MAIN - 0x18);
+	_stall(&test, mPROFILE_EVENT_DMA, 3 | (mDEBUGGER_DMA_IMMEDIATE << 2), 40);
+	_stall(&test, mPROFILE_EVENT_SWI, 0x0F, 60);
+	_stall(&test, mPROFILE_EVENT_DMA, 0 | (mDEBUGGER_DMA_HBLANK << 2), 20);
+	_stall(&test, mPROFILE_EVENT_DMA, 1 | (mDEBUGGER_DMA_SPECIAL << 2), 8);
+	_stall(&test, mPROFILE_EVENT_DMA, 3 | (mDEBUGGER_DMA_SPECIAL << 2), 9);
+	_stall(&test, mPROFILE_EVENT_HALT, 0, 1000);
+	_stall(&test, mPROFILE_EVENT_SWI, 0x80, 70);
+	_jump(&test, 3, 0x08000220, 0x08000112, SP_MAIN);
+	_charge(&test, 1);
+	mProfileFinish(&test.profile);
+	_assertAllCharged(&test);
+
+	uint32_t main = _index(&test.profile, _child(&test.profile, mPROFILE_ROOT_MAIN, "main"));
+	const struct mProfileNode* a = _child(&test.profile, main, "a");
+	const struct mProfileNode* dma = _child(&test.profile, _index(&test.profile, a), "[DMA 3]");
+	assert_int_equal(dma->calls, 2);
+	assert_int_equal(dma->selfCycles, 90);
+	assert_int_equal(a->selfCycles, 2 + 3);
+	assert_int_equal(a->subtreeCycles, 2 + 3 + 90 + 60 + 70);
+	assert_int_equal(_child(&test.profile, _index(&test.profile, a), "[SWI 0x0F ObjAffineSet]")->selfCycles, 60);
+	assert_int_equal(_child(&test.profile, _index(&test.profile, a), "[SWI]")->selfCycles, 70);
+	assert_int_equal(_child(&test.profile, mPROFILE_NONE, "[DMA HBlank]")->selfCycles, 20);
+	assert_int_equal(_child(&test.profile, mPROFILE_NONE, "[DMA sound FIFO]")->selfCycles, 8);
+	assert_int_equal(_child(&test.profile, mPROFILE_NONE, "[DMA video capture]")->selfCycles, 9);
+	const struct mProfileNode* idle = _child(&test.profile, mPROFILE_NONE, "[Idle]");
+	assert_int_equal(idle->calls, 1);
+	assert_int_equal(idle->selfCycles, 1000);
+
+	// The flat list: costs come from the tree, and the caller is the code that started the DMA
+	const struct mProfileFunction* function = _function(&test.profile, "[DMA 3]");
+	assert_int_equal(function->selfCycles, 90);
+	assert_int_equal(function->calls, 2);
+	assert_int_equal(function->executions, 0);
+	assert_int_equal(_edgeBetween(&test.profile, "a", "[DMA 3]")->inclusiveCycles, 90);
+	assert_int_equal(_function(&test.profile, "a")->inclusiveCycles, 2 + 3 + 90 + 60 + 70);
+	size_t top;
+	assert_int_equal(mProfileTopFunctions(&test.profile, &top, 1), 1);
+	assert_string_equal(mProfileFunctionListGetConstPointer(&test.profile.functions, top)->name, "[Idle]");
+
+	// Roots and frames survive saving and loading
+	struct mProfileFrame* frame = mProfileFrameListAppend(&test.profile.frameCosts);
+	frame->cycles = 280896;
+	frame->idleCycles = 80896;
+	frame = mProfileFrameListAppend(&test.profile.frameCosts);
+	frame->cycles = 280900;
+	frame->idleCycles = 900;
+	struct mProfileFrameSummary summary;
+	mProfileSummarizeFrames(&test.profile, &summary);
+	assert_int_equal(summary.count, 2);
+	assert_int_equal(summary.cycles, 280896 + 280900);
+	assert_int_equal(summary.busyCycles, 200000 + 280000);
+	assert_int_equal(summary.worst, 1);
+	assert_int_equal(summary.worstBusyCycles, 280000);
+
+	struct VFile* vf = VFileMemChunk(NULL, 0);
+	assert_true(mProfileSave(&test.profile, vf));
+	struct mProfile loaded;
+	mProfileInit(&loaded);
+	assert_true(mProfileLoad(&loaded, vf));
+	vf->close(vf);
+	assert_int_equal(mProfileNodeListSize(&loaded.nodes), mProfileNodeListSize(&test.profile.nodes));
+	size_t i;
+	for (i = 0; i < mProfileNodeListSize(&loaded.nodes); ++i) {
+		const struct mProfileNode* x = mProfileNodeListGetConstPointer(&test.profile.nodes, i);
+		const struct mProfileNode* y = mProfileNodeListGetConstPointer(&loaded.nodes, i);
+		assert_int_equal(x->function, y->function);
+		assert_int_equal(x->parent, y->parent);
+		assert_int_equal(x->calls, y->calls);
+		assert_int_equal(x->selfCycles, y->selfCycles);
+	}
+	assert_int_equal(loaded.totalCycles, test.profile.totalCycles);
+	assert_int_equal(mProfileFrameListSize(&loaded.frameCosts), 2);
+	assert_int_equal(mProfileFrameListGetConstPointer(&loaded.frameCosts, 1)->idleCycles, 900);
+	// Without symbols, [main] is function 17, [IRQ] 18 and [Idle] 27. Extra roots load, but a
+	// second [main] root doesn't, and nor does a frame with more idle time than time.
+	assert_true(_loadText(&loaded, "mprof 1\nnode -1 17 0 0 0 0\nnode -1 18 0 0 0 0\nnode -1 27 1 0 5 0\nend\n"));
+	assert_int_equal(_child(&loaded, mPROFILE_NONE, "[Idle]")->selfCycles, 5);
+	assert_false(_loadText(&loaded, "mprof 1\nnode -1 17 0 0 0 0\nnode -1 18 0 0 0 0\nnode -1 17 0 0 0 0\nend\n"));
+	assert_false(_loadText(&loaded, "mprof 1\nframe 100 200\nend\n"));
+	mProfileDeinit(&loaded);
+
+	vf = VFileMemChunk(NULL, 0);
+	assert_true(mProfileExportCallgrind(&test.profile, vf));
+	size_t size = vf->size(vf);
+	char* text = calloc(1, size + 1);
+	vf->seek(vf, 0, SEEK_SET);
+	assert_int_equal(vf->read(vf, text, size), size);
+	vf->close(vf);
+	assert_non_null(strstr(text, "fn=[Idle]\n0x00000000 1000 0\n"));
+	assert_non_null(strstr(text, "cfn=[DMA 3]\ncalls=2 0x00000000\n0x08000200 90 0\n"));
+	assert_non_null(strstr(text, "desc: Average frame: 240000 of 280898 cycles busy"));
+	free(text);
+	_teardownProgram(&test);
+}
+
 M_TEST_SUITE_DEFINE(Profile, cmocka_unit_test(countersAndRegions), cmocka_unit_test(elfSymbols),
                     cmocka_unit_test(elfRejectsGarbage), cmocka_unit_test(attribution),
                     cmocka_unit_test(saveLoadRoundTrip), cmocka_unit_test(loadValidation),
@@ -1046,5 +1208,5 @@ M_TEST_SUITE_DEFINE(Profile, cmocka_unit_test(countersAndRegions), cmocka_unit_t
                     cmocka_unit_test(recorderRecursion), cmocka_unit_test(recorderTailCalls),
                     cmocka_unit_test(recorderInterrupts), cmocka_unit_test(recorderUnwinding),
                     cmocka_unit_test(recorderTrampolineAndFallThrough), cmocka_unit_test(recorderHiddenJumps),
-                    cmocka_unit_test(recorderBiosInternalCalls), cmocka_unit_test(treeSaveLoadAndExport),
-                    PROFILE_ROM_TESTS)
+                    cmocka_unit_test(recorderBiosInternalCalls), cmocka_unit_test(recorderStalls),
+                    cmocka_unit_test(treeSaveLoadAndExport), PROFILE_ROM_TESTS)

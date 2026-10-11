@@ -5,6 +5,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include <mgba/internal/debugger/profile.h>
 
+#include <mgba/debugger/debugger.h>
+
 // Rebuilds the call tree from control-flow events. Calls, returns and interrupts are recognized
 // from where each jump actually went and the registers afterwards, not by decoding instructions:
 //
@@ -387,10 +389,57 @@ void mProfileRecorderDeinit(struct mProfileRecorder* recorder) {
 	memset(recorder, 0, sizeof(*recorder));
 }
 
+// Time the CPU didn't run code: a leaf below the code that caused it, or a root of its own
+static void _stall(struct mProfileRecorder* recorder, const struct mProfileEvent* event) {
+	struct mProfile* profile = recorder->profile;
+	uint32_t current = mPROFILE_ROOT_MAIN;
+	if (mProfileRecorderFrameListSize(&recorder->frames)) {
+		current = _top(recorder)->node;
+	}
+	uint32_t node;
+	if (event->type == mPROFILE_EVENT_DMA) {
+		unsigned channel = event->arg & 3;
+		switch (event->arg >> 2) {
+		case mDEBUGGER_DMA_IMMEDIATE:
+			node = mProfileGetChild(profile, current, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_DMA + channel));
+			break;
+		case mDEBUGGER_DMA_HBLANK:
+			node =
+			    mProfileGetChild(profile, mPROFILE_NONE, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_DMA_HBLANK));
+			break;
+		case mDEBUGGER_DMA_VBLANK:
+			node =
+			    mProfileGetChild(profile, mPROFILE_NONE, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_DMA_VBLANK));
+			break;
+		default:
+			// Channels 1 and 2 feed the sound FIFOs; channel 3 does video capture
+			node = mProfileGetChild(
+			    profile, mPROFILE_NONE,
+			    mProfilePseudoFunction(profile, channel == 3 ? mPROFILE_PSEUDO_DMA_VIDEO : mPROFILE_PSEUDO_DMA_FIFO));
+			break;
+		}
+	} else if (event->type == mPROFILE_EVENT_HALT) {
+		node = mProfileGetChild(profile, mPROFILE_NONE, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_IDLE));
+	} else {
+		node = mProfileGetChild(profile, current, mProfileSwiFunction(profile, event->arg));
+	}
+	struct mProfileNode* entry = _node(recorder, node);
+	++entry->calls;
+	entry->selfCycles += event->cycles;
+}
+
 void mProfileRecorderConsume(struct mProfileRecorder* recorder, const struct mProfileEvent* event) {
-	if (event->type == mPROFILE_EVENT_START) {
+	switch (event->type) {
+	case mPROFILE_EVENT_START:
 		_start(recorder, event);
 		return;
+	case mPROFILE_EVENT_DMA:
+	case mPROFILE_EVENT_HALT:
+	case mPROFILE_EVENT_SWI:
+		_stall(recorder, event);
+		return;
+	default:
+		break;
 	}
 	if (!mProfileRecorderFrameListSize(&recorder->frames)) {
 		// Nothing to attribute to before the first START

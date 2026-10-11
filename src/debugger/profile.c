@@ -8,6 +8,53 @@
 DEFINE_VECTOR(mProfileFunctionList, struct mProfileFunction);
 DEFINE_VECTOR(mProfileNodeList, struct mProfileNode);
 DEFINE_VECTOR(mProfileEdgeList, struct mProfileEdge);
+DEFINE_VECTOR(mProfileFrameList, struct mProfileFrame);
+
+static const char* const _swiNames[mPROFILE_SWIS] = {
+	"SoftReset",
+	"RegisterRamReset",
+	"Halt",
+	"Stop",
+	"IntrWait",
+	"VBlankIntrWait",
+	"Div",
+	"DivArm",
+	"Sqrt",
+	"ArcTan",
+	"ArcTan2",
+	"CpuSet",
+	"CpuFastSet",
+	"GetBiosChecksum",
+	"BgAffineSet",
+	"ObjAffineSet",
+	"BitUnPack",
+	"LZ77UnCompWram",
+	"LZ77UnCompVram",
+	"HuffUnComp",
+	"RLUnCompWram",
+	"RLUnCompVram",
+	"Diff8bitUnFilterWram",
+	"Diff8bitUnFilterVram",
+	"Diff16bitUnFilter",
+	"SoundBias",
+	"SoundDriverInit",
+	"SoundDriverMode",
+	"SoundDriverMain",
+	"SoundDriverVSync",
+	"SoundChannelClear",
+	"MidiKey2Freq",
+	"MusicPlayerOpen",
+	"MusicPlayerStart",
+	"MusicPlayerStop",
+	"MusicPlayerContinue",
+	"MusicPlayerFadeOut",
+	"MultiBoot",
+	"HardReset",
+	"CustomHalt",
+	"SoundDriverVSyncOff",
+	"SoundDriverVSyncOn",
+	"SoundGetJumpList",
+};
 
 struct mProfileRanking {
 	uint64_t cycles;
@@ -57,9 +104,31 @@ static void _pseudoName(const struct mProfile* profile, unsigned pseudo, char* n
 		snprintf(name, size, "[unknown]");
 	} else if (pseudo == mPROFILE_PSEUDO_MAIN) {
 		snprintf(name, size, "[main]");
-	} else {
+	} else if (pseudo == mPROFILE_PSEUDO_IRQ) {
 		snprintf(name, size, "[IRQ]");
+	} else if (pseudo < mPROFILE_PSEUDO_DMA_HBLANK) {
+		snprintf(name, size, "[DMA %u]", pseudo - mPROFILE_PSEUDO_DMA);
+	} else if (pseudo == mPROFILE_PSEUDO_DMA_HBLANK) {
+		snprintf(name, size, "[DMA HBlank]");
+	} else if (pseudo == mPROFILE_PSEUDO_DMA_VBLANK) {
+		snprintf(name, size, "[DMA VBlank]");
+	} else if (pseudo == mPROFILE_PSEUDO_DMA_FIFO) {
+		snprintf(name, size, "[DMA sound FIFO]");
+	} else if (pseudo == mPROFILE_PSEUDO_DMA_VIDEO) {
+		snprintf(name, size, "[DMA video capture]");
+	} else if (pseudo == mPROFILE_PSEUDO_IDLE) {
+		snprintf(name, size, "[Idle]");
+	} else if (pseudo < mPROFILE_PSEUDO_SWI_OTHER) {
+		unsigned number = pseudo - mPROFILE_PSEUDO_SWI;
+		snprintf(name, size, "[SWI 0x%02X %s]", number, _swiNames[number]);
+	} else {
+		snprintf(name, size, "[SWI]");
 	}
+}
+
+static bool _isBucket(const struct mProfile* profile, uint32_t function) {
+	return function >= mProfilePseudoFunction(profile, mPROFILE_PSEUDO_DMA) &&
+	    function < mProfilePseudoFunction(profile, mPROFILE_PSEUDO_MAX);
 }
 
 static void _resetTree(struct mProfile* profile) {
@@ -69,14 +138,9 @@ static void _resetTree(struct mProfile* profile) {
 	HashTableClear(&profile->recursionIndex);
 	mProfileEdgeListClear(&profile->edges);
 
-	struct mProfileNode* root = mProfileNodeListAppend(&profile->nodes);
-	memset(root, 0, sizeof(*root));
-	root->function = mProfilePseudoFunction(profile, mPROFILE_PSEUDO_MAIN);
-	root->parent = mPROFILE_NONE;
-	root = mProfileNodeListAppend(&profile->nodes);
-	memset(root, 0, sizeof(*root));
-	root->function = mProfilePseudoFunction(profile, mPROFILE_PSEUDO_IRQ);
-	root->parent = mPROFILE_NONE;
+	// The fixed roots are nodes 0 and 1
+	mProfileGetChild(profile, mPROFILE_NONE, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_MAIN));
+	mProfileGetChild(profile, mPROFILE_NONE, mProfilePseudoFunction(profile, mPROFILE_PSEUDO_IRQ));
 }
 
 static void _rebuildPseudoFunctions(struct mProfile* profile) {
@@ -110,6 +174,7 @@ void mProfileInit(struct mProfile* profile) {
 	mProfileNodeListInit(&profile->nodes, 0);
 	mProfileEdgeListInit(&profile->recursion, 0);
 	mProfileEdgeListInit(&profile->edges, 0);
+	mProfileFrameListInit(&profile->frameCosts, 0);
 	HashTableInit(&profile->children, 0, NULL);
 	HashTableInit(&profile->recursionIndex, 0, NULL);
 	_rebuildPseudoFunctions(profile);
@@ -122,6 +187,7 @@ void mProfileDeinit(struct mProfile* profile) {
 	mProfileNodeListDeinit(&profile->nodes);
 	mProfileEdgeListDeinit(&profile->recursion);
 	mProfileEdgeListDeinit(&profile->edges);
+	mProfileFrameListDeinit(&profile->frameCosts);
 	HashTableDeinit(&profile->children);
 	HashTableDeinit(&profile->recursionIndex);
 	unsigned region;
@@ -149,6 +215,7 @@ void mProfileClear(struct mProfile* profile) {
 	}
 	profile->elapsedCycles = 0;
 	profile->frames = 0;
+	mProfileFrameListClear(&profile->frameCosts);
 	profile->finished = false;
 	profile->totalCycles = 0;
 	profile->totalExecutions = 0;
@@ -276,6 +343,30 @@ uint32_t mProfileFunctionAt(const struct mProfile* profile, uint32_t address) {
 	return mProfilePseudoFunction(profile, mPROFILE_PSEUDO_REGION + region);
 }
 
+uint32_t mProfileSwiFunction(const struct mProfile* profile, unsigned number) {
+	if (number >= mPROFILE_SWIS) {
+		return mProfilePseudoFunction(profile, mPROFILE_PSEUDO_SWI_OTHER);
+	}
+	return mProfilePseudoFunction(profile, mPROFILE_PSEUDO_SWI + number);
+}
+
+void mProfileSummarizeFrames(const struct mProfile* profile, struct mProfileFrameSummary* summary) {
+	memset(summary, 0, sizeof(*summary));
+	size_t i;
+	for (i = 0; i < mProfileFrameListSize(&profile->frameCosts); ++i) {
+		const struct mProfileFrame* frame = mProfileFrameListGetConstPointer(&profile->frameCosts, i);
+		uint32_t busy = frame->cycles - frame->idleCycles;
+		summary->cycles += frame->cycles;
+		summary->busyCycles += busy;
+		if (!summary->count || busy > summary->worstBusyCycles) {
+			summary->worst = i;
+			summary->worstCycles = frame->cycles;
+			summary->worstBusyCycles = busy;
+		}
+		++summary->count;
+	}
+}
+
 ssize_t mProfileFindFunctionByName(const struct mProfile* profile, const char* name) {
 	size_t i;
 	for (i = 0; i < mProfileFunctionListSize(&profile->functions); ++i) {
@@ -385,8 +476,17 @@ void mProfileFinish(struct mProfile* profile) {
 		profile->totalExecutions += profile->other.executions;
 	}
 
-	// Subtree costs: children always come after their parents
+	// Time not spent running code has no per-instruction counters, only call tree nodes
 	size_t nodeCount = mProfileNodeListSize(&profile->nodes);
+	for (i = 0; i < nodeCount; ++i) {
+		const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		if (_isBucket(profile, node->function)) {
+			mProfileFunctionListGetPointer(&profile->functions, node->function)->selfCycles += node->selfCycles;
+			profile->totalCycles += node->selfCycles;
+		}
+	}
+
+	// Subtree costs: children always come after their parents
 	for (i = 0; i < nodeCount; ++i) {
 		struct mProfileNode* node = mProfileNodeListGetPointer(&profile->nodes, i);
 		node->subtreeCycles = node->selfCycles;
@@ -456,7 +556,7 @@ size_t mProfileTopFunctions(const struct mProfile* profile, size_t* indices, siz
 	size_t i;
 	for (i = 0; i < count; ++i) {
 		const struct mProfileFunction* function = mProfileFunctionListGetConstPointer(&profile->functions, i);
-		if (!function->executions) {
+		if (!function->executions && !function->selfCycles) {
 			continue;
 		}
 		rankings[ranked].cycles = function->selfCycles;

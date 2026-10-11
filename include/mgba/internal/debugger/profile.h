@@ -23,6 +23,10 @@ CXX_GUARD_START
 #define mPROFILE_ROOT_MAIN 0
 #define mPROFILE_ROOT_IRQ 1
 
+#define mPROFILE_DMA_CHANNELS 4
+// GBA BIOS calls with names, 0x00 to 0x2A
+#define mPROFILE_SWIS 0x2B
+
 struct VFile;
 
 // Pseudo-functions follow the symbols in the function table, in this order. New kinds go at the
@@ -32,6 +36,21 @@ enum mProfilePseudoFunction {
 	mPROFILE_PSEUDO_OTHER = mPROFILE_PSEUDO_REGION + mPROFILE_REGIONS,
 	mPROFILE_PSEUDO_MAIN,
 	mPROFILE_PSEUDO_IRQ,
+
+	// From here on, time spent not running code. These have no per-instruction counters: their
+	// costs are the call tree's.
+	// [DMA n]: DMA started by code, charged to that code
+	mPROFILE_PSEUDO_DMA,
+	// Roots for DMA that hardware started
+	mPROFILE_PSEUDO_DMA_HBLANK = mPROFILE_PSEUDO_DMA + mPROFILE_DMA_CHANNELS,
+	mPROFILE_PSEUDO_DMA_VBLANK,
+	mPROFILE_PSEUDO_DMA_FIFO,
+	mPROFILE_PSEUDO_DMA_VIDEO,
+	// Root for time the CPU was halted
+	mPROFILE_PSEUDO_IDLE,
+	// [SWI 0xNN Name]: system calls the emulator handled without running BIOS code
+	mPROFILE_PSEUDO_SWI,
+	mPROFILE_PSEUDO_SWI_OTHER = mPROFILE_PSEUDO_SWI + mPROFILE_SWIS,
 	mPROFILE_PSEUDO_MAX
 };
 
@@ -85,9 +104,26 @@ struct mProfileEdge {
 	uint64_t inclusiveExecutions;
 };
 
+struct mProfileFrame {
+	uint32_t cycles;
+	// Cycles the CPU was halted
+	uint32_t idleCycles;
+};
+
+struct mProfileFrameSummary {
+	size_t count;
+	uint64_t cycles;
+	uint64_t busyCycles;
+	// The frame with the most busy cycles
+	size_t worst;
+	uint32_t worstCycles;
+	uint32_t worstBusyCycles;
+};
+
 DECLARE_VECTOR(mProfileFunctionList, struct mProfileFunction);
 DECLARE_VECTOR(mProfileNodeList, struct mProfileNode);
 DECLARE_VECTOR(mProfileEdgeList, struct mProfileEdge);
+DECLARE_VECTOR(mProfileFrameList, struct mProfileFrame);
 
 struct mProfile {
 	// Per-instruction counters: regions (address >> 24) -> pages -> halfword slots
@@ -100,8 +136,8 @@ struct mProfile {
 	size_t symbolCount;
 	char* regionNames[mPROFILE_REGIONS];
 
-	// Call tree: node 0 is the main root and node 1 the interrupt root. A child always has a
-	// higher index than its parent.
+	// Call tree: node 0 is the main root and node 1 the interrupt root. Roots for hardware DMA and
+	// idle time are added as needed. A child always has a higher index than its parent.
 	struct mProfileNodeList nodes;
 	struct Table children;
 	// Recursive entries that were folded into an existing node, by caller and callee function
@@ -114,6 +150,8 @@ struct mProfile {
 	char* idleOptimization;
 	uint64_t elapsedCycles;
 	uint32_t frames;
+	// Each complete frame recorded; a recording's partial first and last frames are left out
+	struct mProfileFrameList frameCosts;
 
 	// Derived by mProfileFinish
 	bool finished;
@@ -163,6 +201,9 @@ static inline uint32_t mProfilePseudoFunction(const struct mProfile* profile, en
 	return profile->symbolCount + pseudo;
 }
 
+uint32_t mProfileSwiFunction(const struct mProfile*, unsigned number);
+void mProfileSummarizeFrames(const struct mProfile*, struct mProfileFrameSummary*);
+
 ssize_t mProfileFindFunction(const struct mProfile*, uint32_t address);
 uint32_t mProfileFunctionAt(const struct mProfile*, uint32_t address);
 ssize_t mProfileFindFunctionByName(const struct mProfile*, const char* name);
@@ -185,13 +226,19 @@ enum mProfileEventType {
 	mPROFILE_EVENT_CYCLES,
 	// Recording started or the emulator was reset: rebuild the call stack from scratch
 	mPROFILE_EVENT_START,
+	// Time the CPU didn't run code. For these, cycles are that time, charged to its own node.
+	// DMA: arg is the channel, plus the mDebuggerDMATrigger shifted left by 2
+	mPROFILE_EVENT_DMA,
+	mPROFILE_EVENT_HALT,
+	// SWI: arg is the call number
+	mPROFILE_EVENT_SWI,
 };
 
 struct mProfileEvent {
 	uint8_t type;
 	// BRANCH: width of the instruction at from
 	uint8_t width;
-	uint16_t reserved;
+	uint16_t arg;
 	// Charged to the current call tree node before the event is applied
 	uint32_t cycles;
 	uint32_t instructions;

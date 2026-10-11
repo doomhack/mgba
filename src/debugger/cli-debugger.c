@@ -112,7 +112,7 @@ static struct CLIDebuggerCommandSummary _debuggerCommands[] = {
 	{ "print", _print, "S+", "Print a value" },
 	{ "print/t", _printBin, "S+", "Print a value as binary" },
 	{ "print/x", _printHex, "S+", "Print a value as hexadecimal" },
-	{ "profile", _profile, "ss", "Profile execution (start, stop, reset, symbols, save, export, top, tree, func)" },
+	{ "profile", _profile, "ss", "Profile execution (start, stop, reset, symbols, save, export, top, tree, func, frames)" },
 	{ "quit", _quit, "", "Quit the emulator" },
 	{ "reset", _reset, "", "Reset the emulation" },
 	{ "r/1", _readByte, "I", "Read a byte from a specified offset" },
@@ -1560,6 +1560,9 @@ static void _destroyProfiler(struct CLIDebugger* debugger) {
 		profiler->recording = false;
 		mDebuggerModuleClearNeedsCallback(&profiler->d);
 	}
+	if (debugger->d.p->cycleCounters == &profiler->counters) {
+		debugger->d.p->cycleCounters = NULL;
+	}
 	mDebuggerDetachModule(debugger->d.p, &profiler->d);
 	mDebuggerProfilerDeinit(profiler);
 	free(profiler);
@@ -1582,8 +1585,15 @@ static void _profileStatus(struct CLIDebugger* debugger, struct mDebuggerProfile
 	                          profile->totalCycles, profile->elapsedCycles,
 	                          profile->totalCycles == profile->elapsedCycles ? "" : " (mismatch)");
 	debugger->backend->printf(debugger->backend, "Frames: %u\n", profile->frames);
+	struct mProfileFrameSummary summary;
+	mProfileSummarizeFrames(profile, &summary);
+	if (summary.count) {
+		debugger->backend->printf(debugger->backend, "Frame time used: %.1f%% on average, %.1f%% at most\n",
+		                          summary.busyCycles * 100.0 / summary.cycles,
+		                          summary.worstBusyCycles * 100.0 / summary.worstCycles);
+	}
 	if (profile->idleOptimization && strcmp(profile->idleOptimization, "ignore") != 0) {
-		debugger->backend->printf(debugger->backend, "Note: idle-loop optimization is \"%s\", so busy-wait loops are not counted as code.\n", profile->idleOptimization);
+		debugger->backend->printf(debugger->backend, "Note: idle-loop optimization is \"%s\", so busy-wait loops count as idle, not code.\n", profile->idleOptimization);
 	}
 }
 
@@ -1700,10 +1710,31 @@ static void _profileTree(struct CLIDebugger* debugger, struct mDebuggerProfiler*
 		return;
 	}
 	debugger->backend->printf(debugger->backend, " Total %%  Self %%        Calls  Function\n");
+	// Main code first, then interrupts, hardware DMA and idle time
 	_profileTreeNode(debugger, profile, mPROFILE_ROOT_MAIN, 0, maxDepth);
-	if (mProfileNodeListGetConstPointer(&profile->nodes, mPROFILE_ROOT_IRQ)->subtreeCycles) {
-		_profileTreeNode(debugger, profile, mPROFILE_ROOT_IRQ, 0, maxDepth);
+	size_t i;
+	for (i = mPROFILE_ROOT_IRQ; i < mProfileNodeListSize(&profile->nodes); ++i) {
+		const struct mProfileNode* node = mProfileNodeListGetConstPointer(&profile->nodes, i);
+		if (node->parent == mPROFILE_NONE && node->subtreeCycles) {
+			_profileTreeNode(debugger, profile, i, 0, maxDepth);
+		}
 	}
+}
+
+static void _profileFrames(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler) {
+	struct mProfileFrameSummary summary;
+	mProfileSummarizeFrames(&profiler->profile, &summary);
+	if (!summary.count) {
+		debugger->backend->printf(debugger->backend, "No complete frames recorded.\n");
+		return;
+	}
+	debugger->backend->printf(debugger->backend, "Complete frames: %u\n", (unsigned) summary.count);
+	debugger->backend->printf(debugger->backend, "Average: %" PRIu64 " of %" PRIu64 " cycles busy (%.1f%%)\n",
+	                          summary.busyCycles / summary.count, summary.cycles / summary.count,
+	                          summary.busyCycles * 100.0 / summary.cycles);
+	debugger->backend->printf(debugger->backend, "Busiest: %u of %u cycles busy (%.1f%%), frame %u\n",
+	                          summary.worstBusyCycles, summary.worstCycles,
+	                          summary.worstBusyCycles * 100.0 / summary.worstCycles, (unsigned) summary.worst + 1);
 }
 
 static void _profileFunction(struct CLIDebugger* debugger, struct mDebuggerProfiler* profiler, struct CLIDebugVector* dv) {
@@ -1802,7 +1833,7 @@ static void _profile(struct CLIDebugger* debugger, struct CLIDebugVector* dv) {
 		return;
 	}
 	bool reads = strcmp(action, "status") == 0 || strcmp(action, "top") == 0 || strcmp(action, "tree") == 0 ||
-	             strcmp(action, "func") == 0;
+	             strcmp(action, "func") == 0 || strcmp(action, "frames") == 0;
 #ifdef ENABLE_VFS
 	reads = reads || strcmp(action, "save") == 0 || strcmp(action, "export") == 0;
 #endif
@@ -1833,6 +1864,8 @@ static void _profile(struct CLIDebugger* debugger, struct CLIDebugVector* dv) {
 			_profileTree(debugger, profiler, argument);
 		} else if (strcmp(action, "func") == 0) {
 			_profileFunction(debugger, profiler, argument);
+		} else if (strcmp(action, "frames") == 0) {
+			_profileFrames(debugger, profiler);
 #ifdef ENABLE_VFS
 		} else {
 			_profileFile(debugger, profiler, action, argument);
