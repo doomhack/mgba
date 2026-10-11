@@ -196,7 +196,7 @@ Each step's `delta` comes from `mTimingGlobalTime`, not `cpu->cycles`. It covers
 - A name that fails to demangle is shown mangled, never dropped.
 - Whatever text the demangler produces is shown as-is. No attempt is made to match GCC's `c++filt` formatting exactly, since that would only add something to break when either side changes.
 - Template-heavy names get very long, so the views offer a short form that drops template arguments and parameter lists (`bn::sprite_ptr::set_position`), with the full name in a tooltip and in exports.
-- QCachegrind doesn't demangle names itself: it showed `_Z21I_PollWServEvents_e32v` from a GBADoom export as-is (checked 2026-10-10). So when a demangler hook is registered, the callgrind export writes demangled names, with the clone suffix in the profiler's format. Without one, as in the SDL CLI debugger, it writes mangled names. `.mprof` files always keep mangled names, since those are the identities.
+- QCachegrind doesn't demangle names itself: it showed `_Z21I_PollWServEvents_e32v` from a GBADoom export as-is (checked 2026-10-10). So the callgrind export writes display names (`mProfileDisplayName`): demangled when a demangler is registered, and with clone suffixes in the profiler's format either way. Without a demangler, as in the SDL CLI debugger, the names stay mangled. `.mprof` files always keep the symbol table's names, since those are the identities. The demangler is a global hook, `mProfileSetDemangler`, so the CLI commands in Qt's debugger console get it too.
 
 **Compiler clones.** GCC emits specialised or split copies of a function as separate symbols with a suffix: `.constprop.N` and `.isra.N` (specialised copies), `.part.N` (the remainder after partial inlining), `.cold` (rarely-taken code moved out of the function), and `.lto_priv.N` (LTO-local). These are real, separate code and are useful insight into what the compiler did, so by default each is its own function in the profile (decision D12).
 
@@ -325,7 +325,7 @@ What a profile holds:
 - **Frames** (recorded by the producer, §2): a growable array with each complete frame's total and idle cycles. That's enough for the average, worst and percentage-of-budget figures (objective 4); at 8 bytes per frame, an hour of recording is under 2 MB. Percentages are of each frame's own length, which is 280,896 cycles on the GBA, so nothing GBA-specific is hard-coded.
 - **Metadata**: ROM title and CRC, ELF path, frames recorded, total cycles, BIOS type, idle-loop setting, mGBA version.
 
-Recording can start and stop at any time, or "reset and start" from boot, or "start at symbol" (for example `main`, as the prototype did). Starting mid-run, the consumer seeds the shadow stack with a single frame for the function at the current PC, since the calls that led there weren't seen.
+Recording can start and stop at any time, or "reset and start" from boot, or "start at symbol" (for example `main`, as the prototype did). Starting mid-run, the consumer seeds the shadow stack with a single frame for the function at the current PC, since the calls that led there weren't seen. As those calls return, each function they return to is entered from the root. So a recording started inside an interrupt handler shows the handler's callers, such as `IntrMain`, as children of `[main]` with one call each, until the next interrupt is seen from its start.
 
 ### 8. File formats
 
@@ -377,6 +377,23 @@ This is also the first frontend built (milestone 1), because it's the quickest w
 
 The full tree, flat list and per-instruction views show the finished profile: after recording stops, or a file is opened. During recording only the live summary updates.
 
+**As built (milestone 4).** The classes in `src/platform/qt/` are:
+
+- `ProfilerController` belongs to the game's `CoreController`, like the memory access logger's controller, so a recording lasts as long as the game. It attaches the profiler module the first time it's needed. Start, stop and reset run with the emulator thread briefly interrupted. Starting autoloads `<rom>.elf` if no symbols are loaded, and clears the previous recording. Closing the game stops any recording first, so the results still reach the window.
+- `ProfileData` is a finished profile that never changes once loaded. A recording is copied into one by saving it to an in-memory `.mprof` and loading that back, so recordings and opened files take the same path. The next recording can't change what's on screen, and comparisons can hold two profiles at once.
+- `ProfileModels` holds the call tree, function list, callers/callees and instruction models; `ProfileCompare` holds the comparison and its two models.
+- `ProfilerView` is the window. It's built in code rather than from a `.ui` file, since most of it is views of models. There's one window per main window, kept when closed, so it can show a recording after the game stops, and open and compare saved profiles with no game running. It's only available in builds with `ENABLE_DEBUGGERS`.
+
+Details of how it behaves:
+
+- The live list shows the ten most expensive functions so far, refreshed once a second. To read them, the window briefly interrupts the emulator thread, brings the tree up to date and runs `mProfileFinish`, which takes a few milliseconds on GBADoom.
+- Selecting a function in either view shows its callers, callees and instructions below. Each view's context menu jumps to the function in the other: in the call tree, to the node where it costs the most.
+- Instructions are disassembled with mGBA's decoder, reading the code from the running game. That needs the game the profile was recorded from (matched by CRC32), so a profile opened without that game shows each instruction's costs without disassembly. Branches to other functions are labelled with the function's name.
+- Short names leave out template arguments, parameters and return types; full names and symbol-table names are in tooltips. Searching matches either.
+- Comparing uses a baseline: a saved profile or the previous recording. Every later recording is compared with it until comparing stops, which suits measure, change, measure again. Costs are per frame when both profiles have frames, so recordings of different lengths compare fairly; otherwise they're totals. Changes of more than 2% are coloured.
+- Only one profiler can record at a time, since there's one set of core counters. The window and the debugger console's `profile` command each have their own, and whichever starts second says so.
+- The core's counters are only used while recording, and the profiler is attached to the debugger only once it's first used, so opening the window costs nothing.
+
 ## Changes outside the new files
 
 Kept deliberately small, each in its own commit:
@@ -400,6 +417,8 @@ None beyond adding files to existing lists:
 - `src/debugger/CMakeLists.txt`: add `profiler.c` (module and producer) and `profile.c` (consumer, data model, file formats) to `SOURCE_FILES`, and the tests to `TEST_FILES`.
 - `src/platform/qt/CMakeLists.txt`: add the new controller and view sources and the `.ui` file to the existing lists, and link the demangler library.
 - `src/third-party/llvm-demangle/`: the vendored demangler with its license file, and a few lines of CMake building it as a small static library with `CXX_STANDARD 17`. LLVM's demangler needs C++17, while the Qt frontend is built as C++14, so it gets its own target rather than changing the frontend's standard.
+
+  As vendored (milestone 4), it's the files from LLVM 19.1.7, unmodified, listed in its `README.md`; the license is also installed as `res/licenses/llvm-demangle.txt`. `ProfileDemangler.cpp` in the Qt frontend wraps `llvm::itaniumDemangle` as an `mProfileDemangler`, and `GBAApp` registers it at startup. MSVC 19.51 (Visual Studio 18) miscompiles the demangler when inlining, giving `big(int, (int))`, so the library is built with `/Ob0` on MSVC, and the Qt tests check for it. GCC's transactional-memory clones (`_ZGTt…`) are a GCC extension LLVM doesn't demangle, so they're shown mangled.
 
 There is no new option: the profiler is part of `ENABLE_DEBUGGERS`. The core library needs no third-party code; the only vendored code is the demangler, used by the Qt frontend alone. ELF symbol loading uses the existing `USE_ELF` support. Without it, the profiler still works with the region-based fallbacks.
 
@@ -445,6 +464,7 @@ If later measurements miss the target, the fixes in order of increasing invasive
 - **Test ROM**: a small devkitARM program with known cycle costs: fixed loops, nested calls, a timer IRQ (plain and nested), immediate and HBlank DMA, `VBlankIntrWait`, and a long-call veneer. Its source and a prebuilt binary are committed, so running the tests doesn't need devkitARM. A cmocka test loads it into a GBA core in-process, attaches the profiler, runs a fixed number of frames, and checks the profile against the expected buckets to within a tolerance (objectives 2 and 3).
   - The milestone 2 version (`src/debugger/test/profile-rom/`) covers the call tree and interrupts: leaf calls, direct and mutual recursion, a function-pointer call, a tail call, ARM code in IWRAM called through a veneer, and HBlank interrupts nested inside a slow timer interrupt. The test checks exact call counts and tree shape, that recursion is reported only where the code really recurses, and that handlers appear only under `[IRQ]`. Milestone 3 added three immediate DMA copies (under the function that started them), three `ObjAffineSet` calls (an SWI mGBA handles in C), an HBlank DMA during the interrupt phase, and `VBlankIntrWait` halts. Every complete frame is checked to be 280,896 cycles, give or take 64, and to include idle time once the start-up code (which clears memory for the first few frames) has finished. Three things the ROM has to work around: GCC turns repeated calls to a pure function into one call unless the function has a side effect; Thumb GCC rarely emits a real tail call, so that one is written in ARM assembly; and libgba's interrupt dispatcher runs handlers with `IME` cleared, so the timer handler sets it again to allow nesting. `make` in that directory rebuilds the ROM and the `profile-rom.h` header the test embeds.
 - **Names**: clone-suffix splitting (C and C++ names, each suffix kind, names without a suffix) and short-name derivation, both of which are the profiler's own code. For the demangler, a list of mangled names taken from a real C++ project (for example a Butano build) checks only that each one demangles to something that isn't the mangled input, or falls back cleanly, without crashing. The test doesn't compare against `c++filt`'s exact text. The test ROM includes one C++ translation unit and one function GCC clones, so the end-to-end test sees both.
+- **Qt** (`test-qt-profile`): `ProfileData` and name shortening, and each model (call tree, function list, callers, instructions with a stand-in for reading code, and both comparison models), on a small profile written out as `.mprof` text. The window itself was checked by driving it through Windows UI Automation on GBADoom: record, stop, browse, search, compare with the previous recording.
 - **Regression against the prototype**: profile the same build of a real project (for example GBADoom) with both and compare the top functions. Differences should be explainable by the IRQ/DMA fixes.
 
 ## Milestones
