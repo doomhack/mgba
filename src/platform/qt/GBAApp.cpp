@@ -36,6 +36,12 @@
 #include "input/SDLInputDriver.h"
 #endif
 
+#ifdef ENABLE_DEBUGGERS
+#include "ProfileDemangler.h"
+
+#include <mgba/internal/debugger/profile.h>
+#endif
+
 #include "moc_GBAApp.cpp"
 
 using namespace QGBA;
@@ -60,6 +66,10 @@ GBAApp::GBAApp(int& argc, char* argv[], ConfigController* config)
 #endif
 
 	SocketSubsystemInit();
+#ifdef ENABLE_DEBUGGERS
+	// Readable C++ names in the profiler, including in the debugger console's profile command
+	mProfileSetDemangler(demangleItanium);
+#endif
 	qRegisterMetaType<const uint32_t*>("const uint32_t*");
 	qRegisterMetaType<mCoreThread*>("mCoreThread*");
 

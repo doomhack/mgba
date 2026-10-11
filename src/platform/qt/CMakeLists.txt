@@ -274,7 +274,25 @@ if(ENABLE_DEBUGGERS)
 		DebuggerConsoleController.cpp
 		MemoryAccessLogController.cpp
 		MemoryAccessLogModel.cpp
-		MemoryAccessLogView.cpp)
+		MemoryAccessLogView.cpp
+		ProfileCompare.cpp
+		ProfileData.cpp
+		ProfileDemangler.cpp
+		ProfileModels.cpp
+		ProfilerController.cpp
+		ProfilerView.cpp)
+
+	add_subdirectory(${PROJECT_SOURCE_DIR}/src/third-party/llvm-demangle ${CMAKE_CURRENT_BINARY_DIR}/llvm-demangle EXCLUDE_FROM_ALL)
+	list(APPEND QT_LIBRARIES llvm-demangle)
+
+	set(TEST_QT_profile_SRC
+		ProfileCompare.cpp
+		ProfileData.cpp
+		ProfileDemangler.cpp
+		ProfileModels.cpp
+		test/profile.cpp
+		utils.cpp
+		VFileDevice.cpp)
 endif()
 
 if(ENABLE_GDB_STUB)
@@ -615,3 +633,6 @@ endif()
 install(TARGETS ${BINARY_NAME}-qt
 	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT ${BINARY_NAME}-qt
 	BUNDLE DESTINATION ${APPDIR} COMPONENT ${BINARY_NAME}-qt)
+if(ENABLE_DEBUGGERS)
+	install(FILES ${PROJECT_SOURCE_DIR}/res/licenses/llvm-demangle.txt DESTINATION ${CMAKE_INSTALL_DOCDIR}/licenses COMPONENT ${BINARY_NAME}-qt)
+endif()

@@ -11,6 +11,7 @@
 #include "MemoryAccessLogController.h"
 #include "MultiplayerController.h"
 #include "Override.h"
+#include "ProfilerController.h"
 
 #include <QAbstractButton>
 #include <QDateTime>
@@ -223,6 +224,8 @@ CoreController::~CoreController() {
 	mCoreThreadJoin(&m_threadContext);
 
 #ifdef ENABLE_DEBUGGERS
+	// The profiler is a module of the debugger, so it has to go first
+	m_profilerController.reset();
 	mDebuggerDeinit(&m_debugger);
 #endif
 
@@ -470,6 +473,13 @@ std::weak_ptr<MemoryAccessLogController> CoreController::memoryAccessLogControll
 	}
 	return m_malController;
 }
+
+std::weak_ptr<ProfilerController> CoreController::profilerController() {
+	if (!m_profilerController) {
+		m_profilerController = std::make_shared<ProfilerController>(this);
+	}
+	return m_profilerController;
+}
 #endif
 
 void CoreController::start() {
@@ -494,6 +504,10 @@ void CoreController::stop() {
 #ifdef ENABLE_DEBUGGERS
 	if (m_malController) {
 		m_malController->stop();
+	}
+	if (m_profilerController) {
+		// Finishes any recording, so it can still be shown after the game closes
+		m_profilerController->stop();
 	}
 
 	detachDebugger();

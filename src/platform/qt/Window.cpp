@@ -49,6 +49,9 @@
 #include "LogView.h"
 #include "MapView.h"
 #include "MemoryAccessLogView.h"
+#ifdef ENABLE_DEBUGGERS
+#include "ProfilerView.h"
+#endif
 #include "MemorySearch.h"
 #include "MemoryView.h"
 #include "MultiplayerController.h"
@@ -676,6 +679,20 @@ void Window::consoleOpen() {
 		m_console->setController(m_controller);
 	}
 	openView(window);
+}
+
+void Window::profilerOpen() {
+	// One window, kept when closed, so a recording can still be looked at after the game stops
+	if (!m_profilerView) {
+		m_profilerView = new ProfilerView;
+		connect(this, &Window::shutdown, m_profilerView.data(), &QObject::deleteLater);
+		if (m_controller) {
+			m_profilerView->setController(m_controller);
+		}
+	}
+	m_profilerView->show();
+	m_profilerView->activateWindow();
+	m_profilerView->raise();
 }
 #endif
 
@@ -1808,6 +1825,7 @@ void Window::setupMenu(QMenuBar* menubar) {
 	m_actions.addSeparator("tools");
 #ifdef ENABLE_DEBUGGERS
 	m_actions.addAction(tr("Open debugger console..."), "debuggerWindow", this, &Window::consoleOpen, "tools");
+	m_actions.addAction(tr("Profiler..."), "profilerWindow", this, &Window::profilerOpen, "tools");
 #ifdef ENABLE_GDB_STUB
 	auto gdbWindow = addGameAction(tr("Start &GDB server..."), "gdbWindow", this, &Window::gdbOpen, "tools");
 	m_platformActions.insert(mPLATFORM_GBA, gdbWindow);
@@ -2297,6 +2315,9 @@ void Window::setController(CoreController* controller) {
 #ifdef ENABLE_DEBUGGERS
 	if (m_console) {
 		m_console->setController(m_controller);
+	}
+	if (m_profilerView) {
+		m_profilerView->setController(m_controller);
 	}
 #endif
 

@@ -43,6 +43,7 @@ class LogController;
 class MemoryAccessLogController;
 class MultiplayerController;
 class Override;
+class ProfilerController;
 
 class CoreController : public QObject {
 Q_OBJECT
@@ -116,6 +117,7 @@ public:
 	void detachDebuggerModule(mDebuggerModule*);
 
 	std::weak_ptr<MemoryAccessLogController> memoryAccessLogController();
+	std::weak_ptr<ProfilerController> profilerController();
 #endif
 
 	void setMultiplayerController(MultiplayerController*);
@@ -334,6 +336,7 @@ private:
 
 #ifdef ENABLE_DEBUGGERS
 	std::shared_ptr<MemoryAccessLogController> m_malController;
+	std::shared_ptr<ProfilerController> m_profilerController;
 #endif
 
 	mVideoLogContext* m_vl = nullptr;

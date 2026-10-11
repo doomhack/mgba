@@ -42,6 +42,7 @@ class GIFView;
 class LibraryController;
 class LogView;
 class OverrideView;
+class ProfilerView;
 class SensorView;
 class ShaderSelector;
 class ShortcutController;
@@ -116,6 +117,7 @@ public slots:
 
 #ifdef ENABLE_DEBUGGERS
 	void consoleOpen();
+	void profilerOpen();
 #endif
 
 #ifdef ENABLE_GDB_STUB
@@ -221,6 +223,7 @@ private:
 	LogView* m_logView;
 #ifdef ENABLE_DEBUGGERS
 	DebuggerConsoleController* m_console = nullptr;
+	QPointer<ProfilerView> m_profilerView;
 #endif
 	LoadSaveState* m_stateWindow = nullptr;
 	WindowBackground* m_screenWidget;
